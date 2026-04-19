@@ -23,6 +23,39 @@
 - GitHub 首页已补齐 README、About、Description 和 Topics。
 - 推荐阅读顺序是：`README -> BEGINNER_MANUAL -> docs -> paired repo -> 本地配置`。
 
+## 一眼看懂
+
+```mermaid
+flowchart LR
+    User["用户 / 渠道消息"] --> OpenClaw["OpenClaw / 微信 / 飞书"]
+    OpenClaw --> Integration["OpenClaw Integration API"]
+    Integration --> Runtime["VCPToolBox Runtime"]
+    Runtime --> Tools["插件 / 工具执行"]
+    Runtime --> Memory["VCP Memory / RAG / Knowledge Base"]
+    Runtime --> Mirror["Channel Mirror Store"]
+    Runtime --> AgentFlow["AgentFlow Runtime"]
+    Mirror --> VCPChat["VCPChat 可视化查看"]
+    AgentFlow --> VCPChat
+```
+
+这个仓库负责的是后端能力层：
+
+- 模型请求与工具执行
+- 统一的记忆、知识库与写入链路
+- OpenClaw 集成接口
+- 渠道镜像落盘
+- AgentFlow Runtime
+
+## 截图预览
+
+| 登录与仪表盘 | 基础配置 |
+| --- | --- |
+| ![VCPToolBox Login](docs/assets/beginner-manual/01-login.png) | ![VCPToolBox Config](docs/assets/beginner-manual/03-base-config.png) |
+
+| 工具箱管理 | RAG 调优 |
+| --- | --- |
+| ![VCPToolBox Toolbox Manager](docs/assets/beginner-manual/10-toolbox-manager.png) | ![VCPToolBox RAG Tuning](docs/assets/beginner-manual/20-rag-tuning.png) |
+
 这是 `VCPToolBox` 的个人二次开发版本，仓库地址为：
 
 - 后端仓库：[hx676/vcptoolbox-openclaw](https://github.com/hx676/vcptoolbox-openclaw)
@@ -100,6 +133,28 @@ node server.js
 - [ensure-node-deps.bat](/E:/2026/VCPToolBox/ensure-node-deps.bat)
 - [start_ccproxy_codex.ps1](/E:/2026/VCPToolBox/start_ccproxy_codex.ps1)
 
+## 一键启动与日志
+
+推荐的本地启动方式：
+
+- [start_server.bat](/E:/2026/VCPToolBox/start_server.bat)
+  作用：先检查依赖，再直接启动 `node server.js`。
+- [ensure-node-deps.bat](/E:/2026/VCPToolBox/ensure-node-deps.bat)
+  作用：发现 `node_modules` 缺失时自动执行 `npm install`。
+- [start_ccproxy_codex.ps1](/E:/2026/VCPToolBox/start_ccproxy_codex.ps1)
+  作用：当前仓库里和 `ccproxy` 相关的辅助启动脚本。
+
+如果你是从前端一键拉起整套系统，也可以直接从 `VCPChat` 侧运行：
+
+- [一键启动VCPChat.bat](/E:/2026/VCPChat/一键启动VCPChat.bat)
+
+本地日志常见位置：
+
+- `vcp.stdout.log`
+- `vcp.stderr.log`
+- `vcp.stdout.prev.log`
+- `vcp.stderr.prev.log`
+
 ## 当前 Fork 里比较重要的定制能力
 
 ### 1. OpenClaw 集成
@@ -157,6 +212,18 @@ node server.js
 - 本地缓存、备份文件和临时目录
 
 所以如果你 fork 之后发现少了这些，不是仓库坏了，而是这些本来就不应该上传到 GitHub。
+
+## 与上游差异
+
+这个 fork 当前和上游相比，已经形成了比较明确的二开方向：
+
+- 新增 OpenClaw 集成接口与渠道镜像存储链路
+- 确认长期知识库与记忆统一走 `VCP-only` 路线
+- 补齐 `vcp_kb_agent_ask`、`vcp_memory_search`、`vcp_memory_write` 相关使用场景
+- 承载 AgentFlow Runtime 及其运行接口
+- 为公开 fork 清理了本地 `config.env`、账号认证数据、镜像数据和浏览器 profile
+
+也就是说，这个仓库不是“原版 VCPToolBox 的直接镜像”，而是已经适配你当前本机实际部署链路的后端主仓。
 
 ## 适合谁
 
