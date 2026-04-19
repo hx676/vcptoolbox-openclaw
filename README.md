@@ -200,6 +200,37 @@ node server.js
 
 - [routes/openclawIntegrationRoutes.js](/E:/2026/VCPToolBox/routes/openclawIntegrationRoutes.js)
 - [modules/openclaw/channelMirrorStore.js](/E:/2026/VCPToolBox/modules/openclaw/channelMirrorStore.js)
+- [OPENCLAW_INTEGRATION.md](./docs/OPENCLAW_INTEGRATION.md)
+
+### OpenClaw 直接怎么工作
+
+当前这套实现不是“OpenClaw 直接碰 VCPChat 文件”，而是固定走下面这条链：
+
+1. OpenClaw 安装本地桥接插件 `VCPChat/OpenClawmodules/vcp-openclaw-bridge`
+2. 插件把 VCP 暴露成 4 类能力：
+   - `vcp_url_fetch / vcp_vsearch / vcp_bilibili_fetch`
+   - `vcp_memory_search`
+   - `vcp_memory_write`
+   - `vcp_kb_agent_ask`
+3. 所有调用都统一打到 `VCPToolBox /v1/integrations/openclaw/*`
+4. `VCPToolBox` 负责工具执行、知识检索、长期记忆写入、镜像落盘
+5. `VCPChat` 只读取 `ChannelMirrorData` 做只读展示
+
+如果你只关心 3 件事：
+
+- 记忆搜索：走 `vcp_memory_search -> /memory/search -> KnowledgeBaseManager.search(...)`
+- 知识代答：走 `vcp_kb_agent_ask -> /kb/ask -> /v1/chat/completions`
+- 长期写入：走 `vcp_memory_write -> /memory/write -> DailyNoteWrite -> dailynote/<notebook>/...`
+
+而“渠道消息 / 工具结果 / 知识回答结果”这三类东西，都会通过 `/mirror/session-event` 落到：
+
+```text
+VCPToolBox/ChannelMirrorData/<channel>/<conversationId-base64>/topics/main/history.json
+```
+
+这部分完整说明已经单独整理在：
+
+- [OPENCLAW_INTEGRATION.md](./docs/OPENCLAW_INTEGRATION.md)
 
 ### 2. AgentFlow Runtime
 
