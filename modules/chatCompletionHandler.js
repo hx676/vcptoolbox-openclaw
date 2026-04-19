@@ -7,6 +7,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { StringDecoder } = require('string_decoder');
 
 // 🌟 核心网络优化：引入防御性长连接池 (Keep-Alive Pool)
 // 解决 "-1s Socket Hang Up" 与上游代理秒断僵尸连接的问题
@@ -91,6 +92,50 @@ function isToolResultError(result) {
  * @param {any} result - 工具返回的结果
  * @returns {string} - 格式化后的字符串
  */
+function hasTextContent(message) {
+  if (!message) return false;
+  if (typeof message.content === 'string') return message.content.trim().length > 0;
+  if (Array.isArray(message.content)) {
+    return message.content.some(part => part && part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0);
+  }
+  return false;
+}
+
+function shouldEnsureCodexInstructions(apiUrl, body) {
+  const upstream = String(apiUrl || '').toLowerCase();
+  const model = String(body?.model || '').toLowerCase();
+  const bufferedApiMatchers = String(process.env.BufferedNonStreamApiUrlMatchers || '')
+    .split(',')
+    .map(item => item.trim().toLowerCase())
+    .filter(Boolean);
+  const bufferedModelMatchers = String(process.env.BufferedNonStreamModelMatchers || '')
+    .split(',')
+    .map(item => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  return (
+    upstream.includes('/codex') ||
+    model.startsWith('openai-codex/') ||
+    model.includes('codex') ||
+    bufferedApiMatchers.some(matcher => upstream.includes(matcher)) ||
+    bufferedModelMatchers.some(matcher => model.includes(matcher))
+  );
+}
+
+function ensureCodexSystemInstruction(messages) {
+  if (!Array.isArray(messages) || messages.some(msg => msg.role === 'system' && hasTextContent(msg))) {
+    return messages;
+  }
+
+  return [
+    {
+      role: 'system',
+      content: process.env.TarSysPrompt || 'You are a helpful assistant.'
+    },
+    ...messages
+  ];
+}
+
 function formatToolResult(result) {
   if (result === undefined || result === null) {
     return '(无返回内容)';
@@ -99,6 +144,148 @@ function formatToolResult(result) {
     return JSON.stringify(result, null, 2);
   }
   return String(result);
+}
+
+async function bufferCodexStreamToChatCompletion(streamingResponse, fallbackModel = 'unknown') {
+  const { Response, Headers } = await import('node-fetch');
+
+  return new Promise((resolve, reject) => {
+    const decoder = new StringDecoder('utf8');
+    let sseLineBuffer = '';
+    let responseId = `chatcmpl-codex-buffer-${Date.now()}`;
+    let responseModel = fallbackModel;
+    let created = Math.floor(Date.now() / 1000);
+    let finishReason = 'stop';
+    let usage = null;
+    const message = { role: 'assistant', content: '' };
+
+    const applyChunk = (parsedData) => {
+      if (!parsedData || typeof parsedData !== 'object') return;
+      if (parsedData.id) responseId = parsedData.id;
+      if (parsedData.model) responseModel = parsedData.model;
+      if (typeof parsedData.created === 'number') created = parsedData.created;
+      if (parsedData.usage) usage = parsedData.usage;
+
+      const choice = parsedData.choices?.[0];
+      if (!choice) return;
+
+      const delta = choice.delta || {};
+      if (typeof delta.content === 'string') {
+        message.content += delta.content;
+      }
+      if (typeof delta.reasoning_content === 'string') {
+        message.reasoning_content = (message.reasoning_content || '') + delta.reasoning_content;
+      }
+      if (choice.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+    };
+
+    const processBufferedLines = (input, flushRemainder = false) => {
+      sseLineBuffer += input;
+      const lines = sseLineBuffer.split(/\r\n|\r|\n/);
+      if (!flushRemainder) {
+        sseLineBuffer = lines.pop();
+      } else {
+        sseLineBuffer = '';
+      }
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine.startsWith('data:')) continue;
+        const jsonData = trimmedLine.slice(5).trim();
+        if (!jsonData || jsonData === '[DONE]') continue;
+        try {
+          applyChunk(JSON.parse(jsonData));
+        } catch (error) {
+        }
+      }
+    };
+
+    streamingResponse.body.on('data', chunk => {
+      const chunkString = decoder.write(chunk);
+      processBufferedLines(chunkString, false);
+    });
+
+    streamingResponse.body.on('end', () => {
+      const remainder = decoder.end();
+      if (remainder) {
+        processBufferedLines(remainder, false);
+      }
+      if (sseLineBuffer) {
+        processBufferedLines('', true);
+      }
+
+      const payload = {
+        id: responseId,
+        object: 'chat.completion',
+        created,
+        model: responseModel || fallbackModel,
+        choices: [
+          {
+            index: 0,
+            message,
+            finish_reason: finishReason || 'stop',
+          },
+        ],
+      };
+
+      if (usage) {
+        payload.usage = usage;
+      }
+
+      resolve(new Response(JSON.stringify(payload), {
+        status: streamingResponse.status,
+        headers: new Headers({
+          'content-type': 'application/json; charset=utf-8',
+        }),
+      }));
+    });
+
+    streamingResponse.body.on('error', reject);
+  });
+}
+
+async function fetchNonStreamCompatibleResponse({
+  apiUrl,
+  apiKey,
+  body,
+  userAgent,
+  abortController,
+  fetchWithRetry,
+  apiRetries,
+  apiRetryDelay,
+  debugMode,
+}) {
+  const streamingResponse = await fetchWithRetry(
+    `${apiUrl}/v1/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'text/event-stream',
+        ...(userAgent && { 'User-Agent': userAgent }),
+      },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: abortController.signal,
+    },
+    {
+      retries: apiRetries,
+      delay: apiRetryDelay,
+      debugMode,
+    },
+  );
+
+  if (!streamingResponse.ok) {
+    return streamingResponse;
+  }
+
+  if (!streamingResponse.headers.get('content-type')?.includes('text/event-stream')) {
+    return streamingResponse;
+  }
+
+  return bufferCodexStreamToChatCompletion(streamingResponse, body.model);
 }
 
 async function getRealAuthCode(debugMode = false) {
@@ -156,6 +343,10 @@ async function fetchWithRetry(
         signal: attemptController.signal,
       });
       cleanup();
+
+      if (response.status === 429 && String(url || '').toLowerCase().includes('/codex')) {
+        return response;
+      }
 
       if (response.status === 500 || response.status === 503 || response.status === 429) {
         const currentDelay = delay * (i + 1);
@@ -422,6 +613,10 @@ class ChatCompletionHandler {
         }
       }
 
+      if (shouldEnsureCodexInstructions(apiUrl, originalBody)) {
+        originalBody.messages = ensureCodexSystemInstruction(originalBody.messages);
+      }
+
       await writeDebugLog('LogInput', originalBody);
 
       // --- 角色分割处理 (Role Divider) - 初始阶段 ---
@@ -623,35 +818,50 @@ class ChatCompletionHandler {
 
       const willStreamResponse = isOriginalRequestStreaming;
 
-      let firstAiAPIResponse = await fetchWithRetry(
-        `${apiUrl}/v1/chat/completions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-            ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
-            Accept: willStreamResponse ? 'text/event-stream' : req.headers['accept'] || 'application/json',
-          },
-          body: JSON.stringify({ ...originalBody, stream: willStreamResponse }),
-          signal: abortController.signal,
-        },
-        {
-          retries: apiRetries,
-          delay: apiRetryDelay,
+      let firstAiAPIResponse;
+      if (!willStreamResponse && shouldEnsureCodexInstructions(apiUrl, originalBody)) {
+        firstAiAPIResponse = await fetchNonStreamCompatibleResponse({
+          apiUrl,
+          apiKey,
+          body: originalBody,
+          userAgent: req.headers['user-agent'],
+          abortController,
+          fetchWithRetry,
+          apiRetries,
+          apiRetryDelay,
           debugMode: DEBUG_MODE,
-          onRetry: async (attempt, errorInfo) => {
-            if (!res.headersSent && isOriginalRequestStreaming) {
-              if (DEBUG_MODE)
-                console.log(`[VCP Retry] First retry attempt (#${attempt}). Sending 200 OK to client to establish stream.`);
-              res.status(200);
-              res.setHeader('Content-Type', 'text/event-stream');
-              res.setHeader('Cache-Control', 'no-cache');
-              res.setHeader('Connection', 'keep-alive');
-            }
+        });
+      } else {
+        firstAiAPIResponse = await fetchWithRetry(
+          `${apiUrl}/v1/chat/completions`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+              ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
+              Accept: willStreamResponse ? 'text/event-stream' : req.headers['accept'] || 'application/json',
+            },
+            body: JSON.stringify({ ...originalBody, stream: willStreamResponse }),
+            signal: abortController.signal,
           },
-        },
-      );
+          {
+            retries: apiRetries,
+            delay: apiRetryDelay,
+            debugMode: DEBUG_MODE,
+            onRetry: async (attempt, errorInfo) => {
+              if (!res.headersSent && isOriginalRequestStreaming) {
+                if (DEBUG_MODE)
+                  console.log(`[VCP Retry] First retry attempt (#${attempt}). Sending 200 OK to client to establish stream.`);
+                res.status(200);
+                res.setHeader('Content-Type', 'text/event-stream');
+                res.setHeader('Cache-Control', 'no-cache');
+                res.setHeader('Connection', 'keep-alive');
+              }
+            },
+          },
+        );
+      }
 
       const isUpstreamStreaming =
         willStreamResponse && firstAiAPIResponse.headers.get('content-type')?.includes('text/event-stream');
@@ -719,6 +929,49 @@ class ChatCompletionHandler {
           return;
         }
 
+        if (!isOriginalRequestStreaming && upstreamStatus !== 200) {
+          const errorBodyText = await firstAiAPIResponse.text();
+          const fallbackErrorBody = JSON.stringify({
+            error: {
+              type: 'upstream_error',
+              message: `Upstream API returned status ${upstreamStatus}`,
+            },
+          });
+          const responseText =
+            typeof errorBodyText === 'string' && errorBodyText.trim().length > 0
+              ? errorBodyText
+              : fallbackErrorBody;
+
+          console.error(
+            `[Upstream Error Proxy] Upstream API returned status ${upstreamStatus}. Forwarding body to client: ${responseText}`,
+          );
+
+          res.status(upstreamStatus);
+          firstAiAPIResponse.headers.forEach((value, name) => {
+            if (
+              !['content-encoding', 'transfer-encoding', 'connection', 'content-length', 'keep-alive'].includes(
+                name.toLowerCase(),
+              )
+            ) {
+              res.setHeader(name, value);
+            }
+          });
+          if (!res.getHeader('Content-Type')) {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          }
+          res.send(responseText);
+
+          if (writeChatLog) {
+            writeChatLog(originalBody, [
+              {
+                request: originalBody,
+                response: { error: true, status: upstreamStatus, body: responseText },
+              },
+            ]);
+          }
+          return;
+        }
+
         // Normal header setting for non-streaming or successful streaming responses
         res.status(upstreamStatus);
         firstAiAPIResponse.headers.forEach((value, name) => {
@@ -747,6 +1000,8 @@ class ChatCompletionHandler {
         forceShowVCP,
         _refreshRagBlocksIfNeeded,
         fetchWithRetry,
+        fetchNonStreamCompatibleResponse,
+        shouldEnsureCodexInstructions,
         isToolResultError,
         formatToolResult
       };

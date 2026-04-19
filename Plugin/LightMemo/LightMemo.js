@@ -790,8 +790,15 @@ class LightMemoPlugin {
 
     async loadSemanticGroups() {
         const semanticGroupsPath = path.join(this.projectBasePath, 'Plugin', 'RAGDiaryPlugin', 'semantic_groups.json');
+        const semanticGroupsExamplePath = path.join(this.projectBasePath, 'Plugin', 'RAGDiaryPlugin', 'semantic_groups.json.example');
         try {
-            const data = await fs.readFile(semanticGroupsPath, 'utf-8');
+            const data = await fs.readFile(semanticGroupsPath, 'utf-8')
+                .catch(async (error) => {
+                    if (error.code !== 'ENOENT') {
+                        throw error;
+                    }
+                    return fs.readFile(semanticGroupsExamplePath, 'utf-8');
+                });
             this.semanticGroups = JSON.parse(data);
             this.wordToGroupMap = new Map();
             if (this.semanticGroups && this.semanticGroups.groups) {
@@ -807,7 +814,7 @@ class LightMemoPlugin {
             }
             console.log(`[LightMemo] Semantic groups loaded successfully. ${this.wordToGroupMap.size} words mapped.`);
         } catch (error) {
-            console.warn('[LightMemo] Could not load semantic_groups.json. Proceeding without query expansion.', error.message);
+            console.warn('[LightMemo] Could not load semantic groups config. Proceeding without query expansion.', error.message);
             this.semanticGroups = null;
             this.wordToGroupMap = new Map();
         }

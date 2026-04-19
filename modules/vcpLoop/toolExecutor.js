@@ -1,7 +1,7 @@
 // modules/vcpLoop/toolExecutor.js
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { getEmbeddingsBatch, cosineSimilarity } = require('../../EmbeddingUtils');
+const { getEmbeddingsBatch, cosineSimilarity, getEmbeddingApiConfig } = require('../../EmbeddingUtils');
 
 /**
  * 提取消息的纯文本字符串
@@ -247,11 +247,7 @@ class ToolExecutor {
           messageVectors = allVectors.slice(1);
         } else {
           // 回退：ragPlugin 不可用时，走 EmbeddingUtils 独立通道
-          const embeddingConfig = {
-            apiKey: process.env.API_KEY,
-            apiUrl: process.env.API_URL,
-            model: process.env.WhitelistEmbeddingModel || 'google/gemini-embedding-001'
-          };
+          const embeddingConfig = getEmbeddingApiConfig();
           const allTexts = [
             queryText.slice(0, 1000),
             ...textMessages.map(m => m.text.slice(0, 1000))

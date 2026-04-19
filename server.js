@@ -15,6 +15,46 @@ const fs = require('fs').promises; // fs.promises for async operations
 const path = require('path');
 const { Writable } = require('stream');
 const fsSync = require('fs'); // Renamed to fsSync for clarity with fs.promises
+const CONFIG_ENV_PATH = path.join(__dirname, 'config.env');
+let trackedConfigEnvKeys = new Set();
+
+function parseBooleanEnv(value, fallback = false) {
+    if (value === undefined || value === null || value === '') {
+        return fallback;
+    }
+    return String(value).toLowerCase() === 'true';
+}
+
+function parseCsvEnv(value) {
+    return String(value || '')
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+function syncTrackedConfigEnvKeysFromDisk() {
+    try {
+        const rawConfig = fsSync.readFileSync(CONFIG_ENV_PATH, 'utf8');
+        trackedConfigEnvKeys = new Set(Object.keys(dotenv.parse(rawConfig)));
+    } catch (error) {
+        console.warn('[ServerSetup] Failed to snapshot config.env keys for hot reload:', error.message);
+        trackedConfigEnvKeys = new Set();
+    }
+}
+
+function applyParsedConfigEnv(parsedEnv) {
+    for (const key of trackedConfigEnvKeys) {
+        if (!Object.prototype.hasOwnProperty.call(parsedEnv, key)) {
+            delete process.env[key];
+        }
+    }
+    for (const [key, value] of Object.entries(parsedEnv)) {
+        process.env[key] = value;
+    }
+    trackedConfigEnvKeys = new Set(Object.keys(parsedEnv));
+}
+
+syncTrackedConfigEnvKeysFromDisk();
 
 // 🌟 核心修复：彻底解放 Node.js 默认的全局连接池限制，防止底层网络排队导致 AdminPanel 死锁
 const http = require('http');
@@ -111,6 +151,7 @@ const messageProcessor = require('./modules/messageProcessor.js');
 const knowledgeBaseManager = require('./KnowledgeBaseManager.js'); // 新增：引入统一知识库管理器
 const pluginManager = require('./Plugin.js');
 const taskScheduler = require('./routes/taskScheduler.js');
+const buildOpenClawIntegrationRoutes = require('./routes/openclawIntegrationRoutes');
 const webSocketServer = require('./WebSocketServer.js'); // 新增 WebSocketServer 引入
 const FileFetcherServer = require('./FileFetcherServer.js'); // 引入新的 FileFetcherServer 模块
 const vcpInfoHandler = require('./vcpInfoHandler.js'); // 引入新的 VCP 信息处理器
@@ -147,8 +188,23 @@ setInterval(() => {
     }
 }, 60 * 1000); // 每分钟检查一次
 
-const ADMIN_USERNAME = process.env.AdminUsername;
-const ADMIN_PASSWORD = process.env.AdminPassword;
+function getAdminCredentials() {
+    return {
+        username: process.env.AdminUsername,
+        password: process.env.AdminPassword
+    };
+}
+
+function getApiConfig() {
+    return {
+        apiKey: process.env.API_Key,
+        apiUrl: process.env.API_URL
+    };
+}
+
+function getServerKey() {
+    return process.env.Key;
+}
 
 const DEBUG_MODE = (process.env.DebugMode || "False").toLowerCase() === "true";
 const CHAT_LOG_ENABLED = (process.env.CHAT_LOG_ENABLED || "false").toLowerCase() === "true";
@@ -184,6 +240,16 @@ const CHINA_MODEL_1_COT = (process.env.ChinaModel1Cot || "false").toLowerCase() 
 // 新增：模型重定向功能
 const ModelRedirectHandler = require('./modelRedirectHandler.js');
 const modelRedirectHandler = new ModelRedirectHandler();
+
+async function reloadMainConfigFromDisk() {
+    const rawConfig = await fs.readFile(CONFIG_ENV_PATH, 'utf-8');
+    const parsedEnv = dotenv.parse(rawConfig);
+    applyParsedConfigEnv(parsedEnv);
+    pluginManager.debugMode = parseBooleanEnv(process.env.DebugMode, false);
+    modelRedirectHandler.setDebugMode(parseBooleanEnv(process.env.DebugMode, false));
+    refreshChatCompletionHandler();
+    return parsedEnv;
+}
 
 // ensureDebugLogDir is now ensureDebugLogDirSync and called by initializeServerLogger
 // writeDebugLog remains for specific debug purposes, it uses fs.promises.
@@ -370,9 +436,6 @@ const specialModelRouter = require('./routes/specialModelRouter');
 app.use(specialModelRouter); // 这个将处理所有白名单模型的请求
 
 const port = process.env.PORT;
-const apiKey = process.env.API_Key;
-const apiUrl = process.env.API_URL;
-const serverKey = process.env.Key;
 
 const cachedEmojiLists = new Map();
 
@@ -411,13 +474,15 @@ const adminAuth = (req, res, next) => {
         }
         // ========== 新增结束 ==========
 
+        const { username: adminUsername, password: adminPassword } = getAdminCredentials();
+
         let clientIp = req.ip;
         if (clientIp && clientIp.substr(0, 7) === "::ffff:") {
             clientIp = clientIp.substr(7);
         }
 
         // 1. 检查管理员凭据是否已配置 (这是最高优先级的安全检查)
-        if (!ADMIN_USERNAME || !ADMIN_PASSWORD) {
+        if (!adminUsername || !adminPassword) {
             console.error('[AdminAuth] AdminUsername or AdminPassword not set in config.env. Admin panel is disabled.');
             // 对API和页面请求返回不同的错误格式
             if (req.path.startsWith('/admin_api') || (req.headers.accept && req.headers.accept.includes('application/json'))) {
@@ -473,7 +538,7 @@ const adminAuth = (req, res, next) => {
         }
 
         // 4. 验证凭据
-        if (!credentials || credentials.name !== ADMIN_USERNAME || credentials.pass !== ADMIN_PASSWORD) {
+        if (!credentials || credentials.name !== adminUsername || credentials.pass !== adminPassword) {
             // 认证失败，处理登录尝试计数（仅对非只读接口计数）
             if (clientIp && !isReadOnlyPath) {
                 const now = Date.now();
@@ -531,6 +596,12 @@ app.use(adminAuth);
 
 // Serve Admin Panel static files only after successful authentication.
 app.use('/AdminPanel', express.static(path.join(__dirname, 'AdminPanel')));
+app.use('/v1/integrations/openclaw', buildOpenClawIntegrationRoutes({
+    pluginManager,
+    knowledgeBaseManager,
+    projectRoot: __dirname,
+    agentManager
+}));
 
 
 // Image server logic is now handled by the ImageServer plugin.
@@ -559,8 +630,12 @@ app.use((req, res, next) => {
         return next();
     }
 
+    if (req.path.startsWith('/v1/integrations/openclaw')) {
+        return next();
+    }
+
     const authHeader = req.headers.authorization;
-    if (!authHeader || authHeader !== `Bearer ${serverKey}`) {
+    if (!authHeader || authHeader !== `Bearer ${getServerKey()}`) {
         return res.status(401).json({ error: 'Unauthorized (Bearer token required)' });
     }
     next();
@@ -574,6 +649,7 @@ app.use((req, res, next) => {
 app.get('/v1/models', async (req, res) => {
     const { default: fetch } = await import('node-fetch');
     try {
+        const { apiUrl, apiKey } = getApiConfig();
         const modelsApiUrl = `${apiUrl}/v1/models`;
         const apiResponse = await fetch(modelsApiUrl, {
             method: 'GET',
@@ -820,44 +896,63 @@ app.post('/v1/interrupt', (req, res) => {
 
 
 
-const chatCompletionHandler = new ChatCompletionHandler({
-    apiUrl,
-    apiKey,
-    modelRedirectHandler,
-    pluginManager,
-    activeRequests,
-    writeDebugLog,
-    writeChatLog,
-    handleDiaryFromAIResponse,
-    webSocketServer,
-    DEBUG_MODE,
-    SHOW_VCP_OUTPUT,
-    VCPToolCode, // 新增：传递VCP工具调用验证码开关
-    RAGMemoRefresh: RAG_MEMO_REFRESH, // 新增：传递RAG日记刷新开关
-    enableRoleDivider: ENABLE_ROLE_DIVIDER, // 新增：传递角色分割开关
-    enableRoleDividerInLoop: ENABLE_ROLE_DIVIDER_IN_LOOP, // 新增：传递循环栈角色分割开关
-    roleDividerIgnoreList: ROLE_DIVIDER_IGNORE_LIST, // 新增：传递角色分割忽略列表
-    roleDividerSwitches: {
-        system: ROLE_DIVIDER_SYSTEM,
-        assistant: ROLE_DIVIDER_ASSISTANT,
-        user: ROLE_DIVIDER_USER
-    },
-    roleDividerScanSwitches: {
-        system: ROLE_DIVIDER_SCAN_SYSTEM,
-        assistant: ROLE_DIVIDER_SCAN_ASSISTANT,
-        user: ROLE_DIVIDER_SCAN_USER
-    },
-    roleDividerRemoveDisabledTags: ROLE_DIVIDER_REMOVE_DISABLED_TAGS,
-    maxVCPLoopStream: parseInt(process.env.MaxVCPLoopStream),
-    maxVCPLoopNonStream: parseInt(process.env.MaxVCPLoopNonStream),
-    apiRetries: parseInt(process.env.ApiRetries) || 3, // 新增：API重试次数
-    apiRetryDelay: parseInt(process.env.ApiRetryDelay) || 1000, // 新增：API重试延迟
-    cachedEmojiLists,
-    detectors,
-    superDetectors,
-    chinaModel1: CHINA_MODEL_1,
-    chinaModel1Cot: CHINA_MODEL_1_COT
-});
+function buildChatCompletionHandlerConfig() {
+    const { apiUrl, apiKey } = getApiConfig();
+    let roleDividerIgnoreList = [];
+    try {
+        roleDividerIgnoreList = JSON.parse(process.env.RoleDividerIgnoreList || '[]');
+    } catch (error) {
+        console.error('Failed to parse RoleDividerIgnoreList during handler refresh:', error);
+    }
+
+    return {
+        apiUrl,
+        apiKey,
+        modelRedirectHandler,
+        pluginManager,
+        activeRequests,
+        writeDebugLog,
+        writeChatLog,
+        handleDiaryFromAIResponse,
+        webSocketServer,
+        DEBUG_MODE: parseBooleanEnv(process.env.DebugMode, false),
+        SHOW_VCP_OUTPUT: parseBooleanEnv(process.env.ShowVCP, false),
+        VCPToolCode: parseBooleanEnv(process.env.VCPToolCode, false),
+        RAGMemoRefresh: parseBooleanEnv(process.env.RAGMemoRefresh, false),
+        enableRoleDivider: parseBooleanEnv(process.env.EnableRoleDivider, false),
+        enableRoleDividerInLoop: parseBooleanEnv(process.env.EnableRoleDividerInLoop, false),
+        roleDividerIgnoreList,
+        roleDividerSwitches: {
+            system: parseBooleanEnv(process.env.RoleDividerSystem, true),
+            assistant: parseBooleanEnv(process.env.RoleDividerAssistant, true),
+            user: parseBooleanEnv(process.env.RoleDividerUser, true)
+        },
+        roleDividerScanSwitches: {
+            system: parseBooleanEnv(process.env.RoleDividerScanSystem, true),
+            assistant: parseBooleanEnv(process.env.RoleDividerScanAssistant, true),
+            user: parseBooleanEnv(process.env.RoleDividerScanUser, true)
+        },
+        roleDividerRemoveDisabledTags: parseBooleanEnv(process.env.RoleDividerRemoveDisabledTags, true),
+        maxVCPLoopStream: parseInt(process.env.MaxVCPLoopStream, 10),
+        maxVCPLoopNonStream: parseInt(process.env.MaxVCPLoopNonStream, 10),
+        apiRetries: parseInt(process.env.ApiRetries, 10) || 3,
+        apiRetryDelay: parseInt(process.env.ApiRetryDelay, 10) || 1000,
+        cachedEmojiLists,
+        detectors,
+        superDetectors,
+        chinaModel1: parseCsvEnv(process.env.ChinaModel1),
+        chinaModel1Cot: parseBooleanEnv(process.env.ChinaModel1Cot, false)
+    };
+}
+
+let chatCompletionHandler;
+
+function refreshChatCompletionHandler() {
+    chatCompletionHandler = new ChatCompletionHandler(buildChatCompletionHandlerConfig());
+    return chatCompletionHandler;
+}
+
+refreshChatCompletionHandler();
 
 // Route for standard chat completions. VCP info is shown based on the .env config.
 app.post('/v1/chat/completions', async (req, res) => {
@@ -1088,13 +1183,95 @@ const adminPanelRoutes = require('./routes/adminPanelRoutes')(
     knowledgeBaseManager, // Pass the knowledgeBaseManager instance
     AGENT_DIR, // Pass the Agent directory path
     cachedEmojiLists,
-    TVS_DIR // Pass the TVStxt directory path
+    TVS_DIR, // Pass the TVStxt directory path
+    {
+        reloadMainConfig: reloadMainConfigFromDisk,
+        reloadPluginRuntime
+    }
 );
 
 // 新增：引入 VCP 论坛 API 路由
 const forumApiRoutes = require('./routes/forumApi');
+const pluginServiceRoutes = express.Router();
+const pluginAdminRoutes = express.Router();
+let pluginRuntimeMounted = false;
 
 // --- End Admin API Router ---
+
+function resetRouterStack(router) {
+    if (router && Array.isArray(router.stack)) {
+        router.stack.length = 0;
+    }
+}
+
+async function reloadCachedEmojiLists() {
+    if (DEBUG_MODE) console.log('开始从插件目录加载表情包列表到缓存 (由 EmojiListGenerator 插件生成)...');
+    const emojiListSourceDir = path.join(__dirname, 'Plugin', 'EmojiListGenerator', 'generated_lists');
+    cachedEmojiLists.clear();
+
+    try {
+        const listFiles = await fs.readdir(emojiListSourceDir);
+        const txtFiles = listFiles.filter(file => file.toLowerCase().endsWith('.txt'));
+
+        if (txtFiles.length === 0) {
+            console.warn(`[Server] No .txt emoji list files found in ${emojiListSourceDir}.`);
+            return;
+        }
+
+        for (const file of txtFiles) {
+            const agentName = path.basename(file, '.txt');
+            const filePath = path.join(emojiListSourceDir, file);
+            const content = await fs.readFile(filePath, 'utf-8');
+            cachedEmojiLists.set(agentName, content);
+        }
+
+        if (DEBUG_MODE) console.log(`[Server] Loaded ${cachedEmojiLists.size} emoji lists into cache.`);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            console.warn(`[Server] Emoji list source directory not found: ${emojiListSourceDir}. Emoji lists will not be available until generated.`);
+        } else {
+            console.error(`[Server] Error loading emoji list cache from ${emojiListSourceDir}:`, error);
+        }
+    }
+}
+
+function injectPluginDependencies() {
+    const dependencies = {
+        knowledgeBaseManager,
+        vcpLogFunctions: pluginManager.getVCPLogFunctions()
+    };
+    if (DEBUG_MODE) console.log('[Server] Injecting dependencies into plugins...');
+
+    for (const [name, module] of pluginManager.messagePreprocessors) {
+        if (typeof module.setDependencies === 'function') {
+            module.setDependencies(dependencies);
+            if (DEBUG_MODE) console.log(`  - Injected dependencies into message preprocessor: ${name}.`);
+        }
+    }
+
+    for (const [name, serviceData] of pluginManager.serviceModules) {
+        if (name !== 'VCPLog' && typeof serviceData.module.setDependencies === 'function') {
+            serviceData.module.setDependencies(dependencies);
+            if (DEBUG_MODE) console.log(`  - Injected dependencies into service: ${name}.`);
+        }
+    }
+}
+
+async function reloadPluginRuntime(reason = 'manual') {
+    console.log(`[Server] Reloading plugin runtime (${reason})...`);
+    pluginManager.setWebSocketServer(webSocketServer);
+    resetRouterStack(pluginServiceRoutes);
+    resetRouterStack(pluginAdminRoutes);
+
+    await pluginManager.loadPlugins();
+    await pluginManager.initializeServices(pluginServiceRoutes, pluginAdminRoutes, __dirname);
+    injectPluginDependencies();
+    await pluginManager.initializeStaticPlugins();
+    await pluginManager.prewarmPythonPlugins();
+    await reloadCachedEmojiLists();
+
+    console.log(`[Server] Plugin runtime reload complete (${reason}).`);
+}
 
 // 新增：异步插件回调路由
 const VCP_ASYNC_RESULTS_DIR = path.join(__dirname, 'VCPAsyncResults');
@@ -1162,92 +1339,16 @@ async function initialize() {
     pluginManager.setProjectBasePath(__dirname);
     pluginManager.setVectorDBManager(knowledgeBaseManager); // 注入 knowledgeBaseManager
 
-    console.log('开始加载插件...');
-    await pluginManager.loadPlugins();
-    console.log('插件加载完成。');
-
-    console.log('开始初始化服务类插件...');
-    // --- 关键顺序调整 ---
-    // 必须先将 WebSocketServer 实例注入到 PluginManager，
-    // 这样在 initializeServices 内部才能正确地为 VCPLog 等插件注入广播函数。
-    pluginManager.setWebSocketServer(webSocketServer);
-
-    await pluginManager.initializeServices(app, adminPanelRoutes, __dirname);
-    // 在所有服务插件都注册完路由后，再将 adminApiRouter 挂载到主 app 上
-    app.use('/admin_api', adminPanelRoutes);
-    // 挂载 VCP 论坛 API 路由
-    app.use('/admin_api/forum', forumApiRoutes);
-    console.log('服务类插件初始化完成，管理面板 API 路由和 VCP 论坛 API 路由已挂载。');
-
-    // --- 新增：通用依赖注入 ---
-    // 在所有服务都初始化完毕后，再执行依赖注入，确保 VCPLog 等服务已准备就绪。
-    try {
-        const dependencies = {
-            knowledgeBaseManager,
-            vcpLogFunctions: pluginManager.getVCPLogFunctions()
-        };
-        if (DEBUG_MODE) console.log('[Server] Injecting dependencies into plugins...');
-
-        // 注入到消息预处理器
-        for (const [name, module] of pluginManager.messagePreprocessors) {
-            if (typeof module.setDependencies === 'function') {
-                module.setDependencies(dependencies);
-                if (DEBUG_MODE) console.log(`  - Injected dependencies into message preprocessor: ${name}.`);
-            }
-        }
-        // 注入到服务模块 (排除VCPLog自身)
-        for (const [name, serviceData] of pluginManager.serviceModules) {
-            if (name !== 'VCPLog' && typeof serviceData.module.setDependencies === 'function') {
-                serviceData.module.setDependencies(dependencies);
-                if (DEBUG_MODE) console.log(`  - Injected dependencies into service: ${name}.`);
-            }
-        }
-    } catch (e) {
-        console.error('[Server] An error occurred during dependency injection:', e);
+    if (!pluginRuntimeMounted) {
+        adminPanelRoutes.use(pluginAdminRoutes);
+        app.use(pluginServiceRoutes);
+        app.use('/admin_api', adminPanelRoutes);
+        app.use('/admin_api/forum', forumApiRoutes);
+        pluginRuntimeMounted = true;
+        console.log('管理面板 API 路由、插件服务路由和 VCP 论坛 API 路由已挂载。');
     }
-    // --- 依赖注入结束 ---
 
-    console.log('开始初始化静态插件...');
-    await pluginManager.initializeStaticPlugins();
-    console.log('静态插件初始化完成。'); // Keep
-    await pluginManager.prewarmPythonPlugins(); // 新增：预热Python插件以解决冷启动问题
-    // EmojiListGenerator (static plugin) is automatically executed as part of the initializeStaticPlugins call above.
-    // Its script (`emoji-list-generator.js`) will run and generate/update the .txt files
-    // in its `generated_lists` directory. No need to call it separately here.
-
-    if (DEBUG_MODE) console.log('开始从插件目录加载表情包列表到缓存 (由EmojiListGenerator插件生成)...');
-    const emojiListSourceDir = path.join(__dirname, 'Plugin', 'EmojiListGenerator', 'generated_lists');
-    cachedEmojiLists.clear();
-
-    try {
-        const listFiles = await fs.readdir(emojiListSourceDir);
-        const txtFiles = listFiles.filter(file => file.toLowerCase().endsWith('.txt'));
-
-        if (txtFiles.length === 0) {
-            if (DEBUG_MODE) console.warn(`[initialize] Warning: No .txt files found in emoji list source directory: ${emojiListSourceDir}`);
-        } else {
-            if (DEBUG_MODE) console.log(`[initialize] Found ${txtFiles.length} emoji list files in ${emojiListSourceDir}. Loading...`);
-            await Promise.all(txtFiles.map(async (fileName) => {
-                const emojiName = fileName.replace(/\.txt$/i, '');
-                const filePath = path.join(emojiListSourceDir, fileName);
-                try {
-                    const listContent = await fs.readFile(filePath, 'utf-8');
-                    cachedEmojiLists.set(emojiName, listContent);
-                } catch (readError) {
-                    console.error(`[initialize] Error reading emoji list file ${filePath}:`, readError.message); // Keep as error
-                    cachedEmojiLists.set(emojiName, `[加载 ${emojiName} 列表失败: ${readError.code}]`);
-                }
-            }));
-            if (DEBUG_MODE) console.log('[initialize] All available emoji lists loaded into cache.');
-        }
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.error(`[initialize] Error: Emoji list source directory not found: ${emojiListSourceDir}. Make sure the EmojiListGenerator plugin ran successfully.`); // Keep as error
-        } else {
-            console.error(`[initialize] Error reading emoji list source directory ${emojiListSourceDir}:`, error.message); // Keep as error
-        }
-    }
-    if (DEBUG_MODE) console.log('表情包列表缓存加载完成。');
+    await reloadPluginRuntime('startup');
 
     // 初始化通用任务调度器
     taskScheduler.initialize(pluginManager, webSocketServer, DEBUG_MODE);
@@ -1294,7 +1395,8 @@ async function startServer() {
     await import('node-fetch');
     console.log('[Server] node-fetch 模块预热完毕，准备处理请求。');
 
-    server = app.listen(port, () => {
+server = app.listen(port, () => {
+        const { apiUrl } = getApiConfig();
         console.log(`中间层服务器正在监听端口 ${port}`);
         console.log(`API 服务器地址: ${apiUrl}`);
 

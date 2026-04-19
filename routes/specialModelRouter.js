@@ -1,17 +1,12 @@
-// routes/specialModelRouter.js
 const express = require('express');
 const dotenv = require('dotenv');
+const http = require('http');
+const https = require('https');
 
 dotenv.config({ path: 'config.env' });
 
 const router = express.Router();
-const API_URL = process.env.API_URL;
-const API_KEY = process.env.API_Key;
-const DEBUG_MODE = (process.env.DebugMode || "False").toLowerCase() === "true";
-const http = require('http');
-const https = require('https');
 
-// 🌟 核心网络优化：引入防御性长连接池 (Keep-Alive Pool)
 const agentOptions = {
   keepAlive: true,
   keepAliveMsecs: 1000,
@@ -22,136 +17,175 @@ const agentOptions = {
 const keepAliveHttpAgent = new http.Agent(agentOptions);
 const keepAliveHttpsAgent = new https.Agent(agentOptions);
 
-const getFetchAgent = function(_parsedURL) {
-  return _parsedURL.protocol === 'http:' ? keepAliveHttpAgent : keepAliveHttpsAgent;
+const getFetchAgent = function(parsedURL) {
+  return parsedURL.protocol === 'http:' ? keepAliveHttpAgent : keepAliveHttpsAgent;
 };
 
-const WHITELIST_IMAGE_MODELS = (process.env.WhitelistImageModel || '').split(',').map(m => m.trim()).filter(Boolean);
-const WHITELIST_EMBEDDING_MODELS = (process.env.WhitelistEmbeddingModel || '').split(',').map(m => m.trim()).filter(Boolean);
-
-if (WHITELIST_IMAGE_MODELS.length > 0) {
-    console.log(`[SpecialRouter] 加载了 ${WHITELIST_IMAGE_MODELS.length} 个图像白名单模型: ${WHITELIST_IMAGE_MODELS.join(', ')}`);
-}
-if (WHITELIST_EMBEDDING_MODELS.length > 0) {
-    console.log(`[SpecialRouter] 加载了 ${WHITELIST_EMBEDDING_MODELS.length} 个向量化白名单模型: ${WHITELIST_EMBEDDING_MODELS.join(', ')}`);
+function getDebugMode() {
+  return String(process.env.DebugMode || 'False').toLowerCase() === 'true';
 }
 
+function getApiUrl() {
+  return String(process.env.API_URL || '').replace(/\/+$/, '');
+}
 
-// 中间件，用于检查请求是否适用于此特殊路由
+function getApiKey() {
+  return process.env.API_Key;
+}
+
+function getEmbeddingApiUrl() {
+  return String(process.env.EMBEDDING_API_URL || process.env.API_URL || '').replace(/\/+$/, '');
+}
+
+function getEmbeddingApiKey() {
+  return process.env.EMBEDDING_API_KEY || process.env.EMBEDDING_API_Key || getApiKey();
+}
+
+function getWhitelistImageModels() {
+  return String(process.env.WhitelistImageModel || '')
+    .split(',')
+    .map(m => m.trim())
+    .filter(Boolean);
+}
+
+function getWhitelistEmbeddingModels() {
+  return String(process.env.WhitelistEmbeddingModel || '')
+    .split(',')
+    .map(m => m.trim())
+    .filter(Boolean);
+}
+
+function copyProxyHeaders(sourceHeaders, res, forceSse = false) {
+  sourceHeaders.forEach((value, name) => {
+    if (!['content-encoding', 'transfer-encoding', 'connection', 'content-length', 'keep-alive'].includes(name.toLowerCase())) {
+      res.setHeader(name, value);
+    }
+  });
+  if (forceSse) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    if (!res.getHeader('Cache-Control')) res.setHeader('Cache-Control', 'no-cache');
+    if (!res.getHeader('Connection')) res.setHeader('Connection', 'keep-alive');
+  }
+}
+
+async function proxyRawResponse(apiResponse, res, preferStream = false) {
+  const contentType = String(apiResponse.headers.get('content-type') || '').toLowerCase();
+  const shouldStream = preferStream || contentType.includes('text/event-stream');
+
+  res.status(apiResponse.status);
+  copyProxyHeaders(apiResponse.headers, res, shouldStream);
+
+  if (shouldStream && apiResponse.body) {
+    apiResponse.body.on('error', (error) => {
+      console.error('[SpecialRouter] Upstream streaming proxy failed:', error.message);
+      if (!res.writableEnded) {
+        res.end();
+      }
+    });
+    apiResponse.body.pipe(res);
+    return;
+  }
+
+  const responseText = await apiResponse.text();
+  res.send(responseText);
+}
+
 router.use((req, res, next) => {
-    // 对于非 POST 请求或没有请求体的请求，立即跳过此路由。
-    // 这可以防止对管理面板的 GET 请求等造成崩溃。
-    if (req.method !== 'POST' || !req.body) {
-        return next('router');
-    }
-
-    // 对于 POST 请求，检查 model 属性。
-    const model = req.body.model;
-
-    // 如果没有 model，跳过此路由。
-    if (!model) {
-        return next('router');
-    }
-
-    // 如果模型在白名单中，则在此路由中处理。
-    if (WHITELIST_IMAGE_MODELS.includes(model) || WHITELIST_EMBEDDING_MODELS.includes(model)) {
-        if (DEBUG_MODE) console.log(`[SpecialRouter] 模型 "${model}" 被特殊模型路由接管。`);
-        return next(); // 继续到此路由中的下一个处理程序
-    }
-
-    // 如果模型不在任何白名单中，跳过此路由。
+  if (req.method !== 'POST' || !req.body) {
     return next('router');
+  }
+
+  const model = req.body.model;
+  if (!model) {
+    return next('router');
+  }
+
+  const imageWhitelist = getWhitelistImageModels();
+  const embeddingWhitelist = getWhitelistEmbeddingModels();
+
+  if (imageWhitelist.includes(model) || embeddingWhitelist.includes(model)) {
+    if (getDebugMode()) {
+      console.log(`[SpecialRouter] Model "${model}" was claimed by the special model router.`);
+    }
+    return next();
+  }
+
+  return next('router');
 });
 
-
-// 处理图像模型
 router.post('/v1/chat/completions', async (req, res) => {
-    const model = req.body.model;
+  const model = req.body.model;
+  if (!getWhitelistImageModels().includes(model)) {
+    return res.status(400).json({ error: 'Model does not match the image-model whitelist.' });
+  }
 
-    if (!WHITELIST_IMAGE_MODELS.includes(model)) {
-        // 理论上不会进入这里，因为上面的 use 中间件已经过滤了
-        return res.status(400).json({ error: "模型不匹配图像模型白名单" });
+  if (getDebugMode()) {
+    console.log(`[SpecialRouter] Proxying image model chat completion for: ${model}`);
+  }
+
+  const modifiedBody = {
+    ...req.body,
+    generationConfig: {
+      ...req.body.generationConfig,
+      responseModalities: ['TEXT', 'IMAGE'],
+      responseMimeType: 'text/plain'
     }
+  };
 
-    if (DEBUG_MODE) console.log(`[SpecialRouter] 正在处理图像模型: ${model}`);
-    
-    // 图像模型需要特殊的 generationConfig
-    const modifiedBody = {
-        ...req.body,
-        generationConfig: {
-            ...req.body.generationConfig,
-            responseModalities: ["TEXT", "IMAGE"],
-            responseMimeType: "text/plain",
-        }
-    };
+  try {
+    const { default: fetch } = await import('node-fetch');
+    const apiResponse = await fetch(`${getApiUrl()}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getApiKey()}`,
+        ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
+        'Accept': req.headers['accept'] || 'application/json'
+      },
+      agent: getFetchAgent,
+      body: JSON.stringify(modifiedBody)
+    });
 
-    try {
-        const { default: fetch } = await import('node-fetch');
-        const apiResponse = await fetch(`${API_URL}/v1/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${API_KEY}`,
-                ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
-                'Accept': req.headers['accept'] || 'application/json',
-            },
-            agent: getFetchAgent, // 注入防御性长连接池
-            body: JSON.stringify(modifiedBody),
-        });
-
-        // 对于非流式JSON API，更稳妥的方式是完整接收后用 res.json() 返回
-        const responseJson = await apiResponse.json();
-        // 同样，客户端可能只期望得到核心的 candidates 数组
-        if (responseJson && responseJson.candidates) {
-            res.status(apiResponse.status).json(responseJson.candidates);
-        } else {
-            res.status(apiResponse.status).json(responseJson);
-        }
-
-    } catch (error) {
-        console.error(`[SpecialRouter] 转发图像模型 "${model}" 请求时出错:`, error.message, error.stack);
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Internal Server Error during image model proxy', details: error.message });
-        }
+    await proxyRawResponse(apiResponse, res, !!req.body.stream);
+  } catch (error) {
+    console.error(`[SpecialRouter] Error while proxying image model "${model}":`, error.message, error.stack);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal Server Error during image model proxy', details: error.message });
     }
+  }
 });
 
-
-// 处理向量化模型
 router.post('/v1/embeddings', async (req, res) => {
-    const model = req.body.model;
+  const model = req.body.model;
+  if (!getWhitelistEmbeddingModels().includes(model)) {
+    return res.status(400).json({ error: 'Model does not match the embedding-model whitelist.' });
+  }
 
-    if (!WHITELIST_EMBEDDING_MODELS.includes(model)) {
-        return res.status(400).json({ error: "模型不匹配向量化模型白名单" });
+  if (getDebugMode()) {
+    console.log(`[SpecialRouter] Proxying embeddings for: ${model}`);
+  }
+
+  try {
+    const { default: fetch } = await import('node-fetch');
+    const apiResponse = await fetch(`${getEmbeddingApiUrl()}/v1/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getEmbeddingApiKey()}`,
+        ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
+        'Accept': req.headers['accept'] || 'application/json'
+      },
+      agent: getFetchAgent,
+      body: JSON.stringify(req.body)
+    });
+
+    await proxyRawResponse(apiResponse, res, false);
+  } catch (error) {
+    console.error(`[SpecialRouter] Error while proxying embedding model "${model}":`, error.message, error.stack);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal Server Error during embedding model proxy', details: error.message });
     }
-
-    if (DEBUG_MODE) console.log(`[SpecialRouter] 正在处理向量化模型 (透传): ${model}`);
-
-    try {
-        const { default: fetch } = await import('node-fetch');
-        const apiResponse = await fetch(`${API_URL}/v1/embeddings`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${API_KEY}`,
-                ...(req.headers['user-agent'] && { 'User-Agent': req.headers['user-agent'] }),
-                'Accept': req.headers['accept'] || 'application/json',
-            },
-            agent: getFetchAgent, // 注入防御性长连接池
-            body: JSON.stringify(req.body),
-        });
-
-        const responseJson = await apiResponse.json();
-        // 直接将从上游API收到的完整JSON响应转发给客户端，实现真正的“透传”
-        res.status(apiResponse.status).json(responseJson);
-
-    } catch (error) {
-        console.error(`[SpecialRouter] 转发向量化模型 "${model}" 请求时出错:`, error.message, error.stack);
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Internal Server Error during embedding model proxy', details: error.message });
-        }
-    }
+  }
 });
-
 
 module.exports = router;

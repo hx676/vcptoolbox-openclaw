@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const chokidar = require('chokidar');
 const { chunkText } = require('./TextChunker');
-const { getEmbeddingsBatch } = require('./EmbeddingUtils');
+const { getEmbeddingsBatch, getEmbeddingApiConfig } = require('./EmbeddingUtils');
 const ResultDeduplicator = require('./ResultDeduplicator'); // ✅ Tagmemo v4 requirement
 const TagMemoEngine = require('./TagMemoEngine');
 
@@ -25,12 +25,13 @@ try {
 
 class KnowledgeBaseManager {
     constructor(config = {}) {
+        const embeddingConfig = getEmbeddingApiConfig(config);
         this.config = {
             rootPath: config.rootPath || process.env.KNOWLEDGEBASE_ROOT_PATH || path.join(__dirname, 'dailynote'),
             storePath: config.storePath || process.env.KNOWLEDGEBASE_STORE_PATH || path.join(__dirname, 'VectorStore'),
-            apiKey: process.env.API_Key,
-            apiUrl: process.env.API_URL,
-            model: process.env.WhitelistEmbeddingModel || 'google/gemini-embedding-001',
+            apiKey: embeddingConfig.apiKey,
+            apiUrl: embeddingConfig.apiUrl,
+            model: embeddingConfig.model,
             // ⚠️ 务必确认环境变量 VECTORDB_DIMENSION 与模型一致 (3-small通常为1536)
             dimension: parseInt(process.env.VECTORDB_DIMENSION) || 3072,
 

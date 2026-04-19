@@ -7,8 +7,15 @@ const blockedManifestExtension = '.block';
 
 module.exports = function(options) {
     const router = express.Router();
-    const { pluginManager, DEBUG_MODE } = options;
+    const { pluginManager, DEBUG_MODE, reloadPluginRuntime } = options;
     const PREPROCESSOR_ORDER_FILE = path.join(__dirname, '..', '..', 'preprocessor_order.json');
+    const reloadPlugins = async (reason = 'admin-plugin-update') => {
+        if (typeof reloadPluginRuntime === 'function') {
+            await reloadPluginRuntime(reason);
+        } else {
+            await pluginManager.loadPlugins();
+        }
+    };
 
     // GET plugin list
     router.get('/plugins', async (req, res) => {
@@ -139,7 +146,7 @@ module.exports = function(options) {
             if (enable) {
                 try {
                     await fs.rename(blockedManifestPathToUse, manifestPathToUse);
-                    await pluginManager.loadPlugins();
+                    await reloadPlugins(`plugin-toggle-enable:${pluginName}`);
                     res.json({ message: `插件 ${pluginName} 已启用。` });
                 } catch (error) {
                     if (error.code === 'ENOENT') {
@@ -157,7 +164,7 @@ module.exports = function(options) {
             } else {
                 try {
                     await fs.rename(manifestPathToUse, blockedManifestPathToUse);
-                    await pluginManager.loadPlugins();
+                    await reloadPlugins(`plugin-toggle-disable:${pluginName}`);
                     res.json({ message: `插件 ${pluginName} 已禁用。` });
                 } catch (error) {
                     if (error.code === 'ENOENT') {
@@ -231,7 +238,7 @@ module.exports = function(options) {
 
             manifest.description = description;
             await fs.writeFile(targetManifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
-            await pluginManager.loadPlugins();
+            await reloadPlugins(`plugin-description:${pluginName}`);
             res.json({ message: `插件 ${pluginName} 的描述已更新并重新加载。` });
         } catch (error) {
             console.error(`[AdminPanelRoutes] Error updating description for plugin ${pluginName}:`, error);
@@ -283,7 +290,7 @@ module.exports = function(options) {
 
             const configPath = path.join(targetPluginPath, 'config.env');
             await fs.writeFile(configPath, content, 'utf-8');
-            await pluginManager.loadPlugins();
+            await reloadPlugins(`plugin-config:${pluginName}`);
             res.json({ message: `插件 ${pluginName} 的配置已保存并已重新加载。` });
         } catch (error) {
             console.error(`[AdminPanelRoutes] Error writing config.env for plugin ${pluginName}:`, error);
@@ -360,7 +367,7 @@ module.exports = function(options) {
             }
 
             await fs.writeFile(targetManifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
-            await pluginManager.loadPlugins();
+            await reloadPlugins(`plugin-command-description:${pluginName}`);
             res.json({ message: `指令 '${commandIdentifier}' 在插件 '${pluginName}' 中的描述已更新并重新加载。` });
         } catch (error) {
             console.error(`[AdminPanelRoutes] Error updating command description for plugin ${pluginName}, command ${commandIdentifier}:`, error);
@@ -389,7 +396,8 @@ module.exports = function(options) {
             await fs.writeFile(PREPROCESSOR_ORDER_FILE, JSON.stringify(order, null, 2), 'utf-8');
             if (DEBUG_MODE) console.log('[AdminAPI] Saved new preprocessor order to file.');
 
-            const newOrder = await pluginManager.hotReloadPluginsAndOrder();
+            await reloadPlugins('preprocessor-order-update');
+            const newOrder = pluginManager.getPreprocessorOrder();
             res.json({ status: 'success', message: 'Order saved and hot-reloaded successfully.', newOrder });
         } catch (error) {
             console.error('[AdminAPI] Error saving or hot-reloading preprocessor order:', error);

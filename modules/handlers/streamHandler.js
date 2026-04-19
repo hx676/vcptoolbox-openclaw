@@ -259,7 +259,7 @@ class StreamHandler {
 
           const forceThisOne = !shouldShowVCP && toolCall.markHistory;
           if ((shouldShowVCP || forceThisOne) && !res.writableEnded && (isError || forceThisOne)) {
-            vcpInfoHandler.streamVcpInfo(res, originalBody.model, result.success ? 'success' : 'error', toolCall.name, result.raw || result.error, abortController);
+            vcpInfoHandler.streamVcpInfo(res, originalBody.model, toolCall.name, result.success ? 'success' : 'error', result.raw || result.error, abortController);
           }
           return { tool: toolCall, result: result.content };
         } catch (e) {

@@ -204,3 +204,12 @@ rust-vexus-lite/target/
 VCPDistributedServer
 # XiaohongshuFetch config
 Plugin/XiaohongshuFetch/config.env
+ChannelMirrorData/
+CodexAccounts/
+Plugin/XiaohongshuFetch/browser_profile/
+Plugin/XiaohongshuFetch/__pycache__/
+ccproxy-api/
+VCPChat/
+config.env.bak-*
+Plugin/ScheduleManager/schedules.json
+*.auth.json

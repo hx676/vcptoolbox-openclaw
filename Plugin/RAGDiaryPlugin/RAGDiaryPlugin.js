@@ -15,6 +15,7 @@ const AIMemoHandler = require('./AIMemoHandler.js');
 const ContextVectorManager = require('./ContextVectorManager.js');
 const CacheManager = require('./CacheManager.js'); // 🌟 新增：统一缓存管理器
 const { chunkText } = require('../../TextChunker.js');
+const { getEmbeddingApiConfig } = require('../../EmbeddingUtils.js');
 
 
 const dayjs = require('dayjs');
@@ -3180,9 +3181,7 @@ class RAGDiaryPlugin {
             return null;
         }
 
-        const apiKey = process.env.API_Key;
-        const apiUrl = process.env.API_URL;
-        const embeddingModel = process.env.WhitelistEmbeddingModel;
+        const { apiKey, apiUrl, model: embeddingModel } = getEmbeddingApiConfig();
 
         if (!apiKey || !apiUrl || !embeddingModel) {
             console.error('[RAGDiaryPlugin] Embedding API credentials or model is not configured in environment variables.');
@@ -3317,9 +3316,7 @@ class RAGDiaryPlugin {
     async getBatchEmbeddings(texts) {
         if (!texts || !Array.isArray(texts) || texts.length === 0) return [];
 
-        const apiKey = process.env.API_Key;
-        const apiUrl = process.env.API_URL;
-        const embeddingModel = process.env.WhitelistEmbeddingModel;
+        const { apiKey, apiUrl, model: embeddingModel } = getEmbeddingApiConfig();
 
         if (!apiKey || !apiUrl || !embeddingModel) {
             console.error('[RAGDiaryPlugin] Embedding API credentials or model is not configured.');

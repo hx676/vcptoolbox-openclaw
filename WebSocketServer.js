@@ -1,6 +1,5 @@
 // WebSocketServer.js
 const WebSocket = require('ws');
-const url = require('url');
 
 let wssInstance;
 let pluginManager = null; // 为 PluginManager 实例占位
@@ -46,7 +45,7 @@ function initialize(httpServer, config) {
     wssInstance = new WebSocket.Server({ noServer: true });
 
     httpServer.on('upgrade', (request, socket, head) => {
-        const parsedUrl = url.parse(request.url, true);
+        const parsedUrl = new URL(request.url, 'http://localhost');
         const pathname = parsedUrl.pathname;
 
         const vcpLogPathRegex = /^\/VCPlog\/VCP_Key=(.+)$/;

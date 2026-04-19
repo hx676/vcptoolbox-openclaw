@@ -229,11 +229,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         event.preventDefault();
         const newConfigString = buildEnvString(baseConfigForm, originalBaseConfigEntries);
         try {
-            await apiFetch(`${API_BASE_URL}/config/main`, {
+            const response = await apiFetch(`${API_BASE_URL}/config/main`, {
                 method: 'POST',
                 body: JSON.stringify({ content: newConfigString })
             });
-            showMessage('全局配置已保存！部分更改可能需要重启服务生效。', 'success');
+            showMessage(response?.message || '全局配置已保存！', 'success', 5000);
             loadBaseConfig();
         } catch (error) { /* Error handled by apiFetch */ }
     }

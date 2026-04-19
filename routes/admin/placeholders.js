@@ -162,7 +162,11 @@ module.exports = function(options) {
                     const toolDesc = pluginDescByTool.get(placeholderKey) || '';
                     list.push({ type: 'tool_description', name: `{{${placeholderKey}}}`, preview: truncatePreview(description), charCount: charCount(description), description: toolDesc });
                 }
-                const vcpDescriptionsList = [...individualPluginDescriptions.values()];
+                const vcpDescriptionsList = [
+                    pluginManager.getAllToolsPromptDescription
+                        ? pluginManager.getAllToolsPromptDescription()
+                        : 'No available VCP tool descriptions'
+                ];
                 const allVcpToolsString = vcpDescriptionsList.length > 0 ? vcpDescriptionsList.join('\n\n---\n\n') : '没有可用的VCP工具描述信息';
                 list.push({ type: 'vcp_all_tools', name: '{{VCPAllTools}}', preview: truncatePreview(allVcpToolsString), charCount: charCount(allVcpToolsString) });
             }
@@ -253,7 +257,11 @@ module.exports = function(options) {
                 }
                 case 'vcp_all_tools': {
                     const individualPluginDescriptions = pluginManager.getIndividualPluginDescriptions && pluginManager.getIndividualPluginDescriptions();
-                    const vcpDescriptionsList = individualPluginDescriptions ? [...individualPluginDescriptions.values()] : [];
+                    const vcpDescriptionsList = [
+                        pluginManager.getAllToolsPromptDescription
+                            ? pluginManager.getAllToolsPromptDescription()
+                            : 'No available VCP tool descriptions'
+                    ];
                     value = vcpDescriptionsList.length > 0 ? vcpDescriptionsList.join('\n\n---\n\n') : '没有可用的VCP工具描述信息';
                     break;
                 }

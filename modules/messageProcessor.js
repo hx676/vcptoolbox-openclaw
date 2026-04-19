@@ -423,12 +423,11 @@ async function replaceOtherVariables(text, model, role, context) {
         }
 
         if (processedText.includes('{{VCPAllTools}}')) {
-            const vcpDescriptionsList = [];
-            if (individualPluginDescriptions && individualPluginDescriptions.size > 0) {
-                for (const description of individualPluginDescriptions.values()) {
-                    vcpDescriptionsList.push(description);
-                }
-            }
+            const vcpDescriptionsList = [
+                pluginManager.getAllToolsPromptDescription
+                    ? pluginManager.getAllToolsPromptDescription()
+                    : 'No available VCP tool descriptions'
+            ];
             const allVcpToolsString = vcpDescriptionsList.length > 0 ? vcpDescriptionsList.join('\n\n---\n\n') : '没有可用的VCP工具描述信息';
             processedText = processedText.replaceAll('{{VCPAllTools}}', allVcpToolsString);
         }

@@ -8,6 +8,8 @@ require('dotenv').config({ path: path.join(__dirname, '..', '..', 'config.env') 
 // --- Configuration ---
 const DEBUG_MODE = (process.env.DebugMode || "false").toLowerCase() === "true";
 const CONFIGURED_EXTENSION = (process.env.DAILY_NOTE_EXTENSION || "txt").toLowerCase() === "md" ? "md" : "txt";
+const FILE_NAME_MODE = (process.env.DAILY_NOTE_FILENAME_MODE || "timestamp").toLowerCase();
+const THEMED_FILE_PREFIX = process.env.DAILY_NOTE_THEMED_PREFIX || "知识库";
 const projectBasePath = process.env.PROJECT_BASE_PATH;
 const dailyNoteRootPath = process.env.KNOWLEDGEBASE_ROOT_PATH || (projectBasePath ? path.join(projectBasePath, 'dailynote') : path.join(__dirname, '..', '..', 'dailynote'));
 
@@ -16,6 +18,25 @@ const TAG_MODEL = process.env.TagModel || 'gemini-2.5-flash-preview-09-2025-thin
 const TAG_MODEL_MAX_OUTPUT_TOKENS = parseInt(process.env.TagModelMaxOutPutTokens || '30000', 10);
 const TAG_MODEL_MAX_TOKENS = parseInt(process.env.TagModelMaxTokens || '40000', 10);
 const TAG_MODEL_PROMPT_FILE = process.env.TagModelPrompt || 'TagMaster.txt';
+const SILVER_COMPANION_PRIVATE_NOTEBOOKS = Object.freeze([
+    {
+        notebook: '银发陪伴助手',
+        aliases: new Set([
+            'silvercompanion',
+            'silvercompanioncompanion',
+            'silvercompanion_companion',
+            '银发陪伴助手'
+        ]),
+    },
+    {
+        notebook: '银发分析助手',
+        aliases: new Set([
+            'silvercompanionanalyzer',
+            'silvercompanion_analyzer',
+            '银发分析助手'
+        ]),
+    },
+]);
 
 // API configuration from root config.env
 const API_KEY = process.env.API_Key;
@@ -57,6 +78,104 @@ function sanitizePathComponent(name) {
 
     // If the name is empty after sanitization (e.g., it was just "."), use a fallback.
     return sanitized || 'Untitled';
+}
+
+function isSilverCompanionIdentity(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return SILVER_COMPANION_PRIVATE_NOTEBOOKS.some((item) => item.aliases.has(normalized));
+}
+
+function resolveSilverCompanionNotebook(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    const matched = SILVER_COMPANION_PRIVATE_NOTEBOOKS.find((item) => item.aliases.has(normalized));
+    if (matched) return matched.notebook;
+
+    const companionMatch = normalized.match(/^silvercompanion_(.+)_companion$/);
+    if (companionMatch && companionMatch[1]) {
+        return `银发陪伴助手__${companionMatch[1]}`;
+    }
+
+    const analyzerMatch = normalized.match(/^silvercompanion_(.+)_analyzer$/);
+    if (analyzerMatch && analyzerMatch[1]) {
+        return `银发分析助手__${analyzerMatch[1]}`;
+    }
+
+    return null;
+}
+
+function normalizeSilverCompanionMaid(folderName, actualMaidName) {
+    const resolvedNotebook = resolveSilverCompanionNotebook(folderName) || resolveSilverCompanionNotebook(actualMaidName);
+    if (resolvedNotebook) {
+        debugLog(`SilverCompanion notebook interception: "${folderName}" / "${actualMaidName}" -> "${resolvedNotebook}"`);
+        return {
+            folderName: resolvedNotebook,
+            actualMaidName: resolvedNotebook
+        };
+    }
+    return { folderName, actualMaidName };
+}
+
+function limitFileNamePart(value, maxLength = 48) {
+    const text = sanitizePathComponent(value)
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_');
+    return text.length > maxLength ? text.slice(0, maxLength).replace(/_+$/g, '') : text;
+}
+
+function extractTitleFromContent(contentText) {
+    const lines = String(contentText || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+    const patterns = [
+        /^#\s+(.+)$/,
+        /^标题[:：]\s*(.+)$/,
+        /^主题[:：]\s*(.+)$/,
+        /^项目[:：]\s*(.+)$/,
+        /^摘要[:：]\s*(.+)$/,
+    ];
+    for (const line of lines) {
+        if (/^Tag[:：]/i.test(line)) continue;
+        for (const pattern of patterns) {
+            const match = line.match(pattern);
+            if (match?.[1]) return match[1].replace(/^#+\s*/, '').trim();
+        }
+    }
+    const firstContentLine = lines.find(line => !/^\[?\d{1,2}:\d{2}\]?/.test(line) && !/^[-*>`]/.test(line) && !/^Tag[:：]/i.test(line));
+    return firstContentLine || "未命名知识";
+}
+
+function shouldUseThemedFileName(folderName, actualMaidName, contentText) {
+    if (FILE_NAME_MODE === "title" || FILE_NAME_MODE === "themed") return true;
+    if (FILE_NAME_MODE !== "smart") return false;
+    const haystack = `${folderName}\n${actualMaidName}\n${contentText}`;
+    return /知识库|知识卡片|办公知识|项目记录|会议纪要|SOP|复盘|资料索引/.test(haystack);
+}
+
+async function uniqueFilePath(dirPath, baseFileNameWithoutExt, fileExtension) {
+    let filePath = path.join(dirPath, `${baseFileNameWithoutExt}${fileExtension}`);
+    for (let index = 2; index < 1000; index += 1) {
+        try {
+            await fs.access(filePath);
+        } catch {
+            return filePath;
+        }
+        filePath = path.join(dirPath, `${baseFileNameWithoutExt}-${String(index).padStart(2, '0')}${fileExtension}`);
+    }
+    return path.join(dirPath, `${baseFileNameWithoutExt}-${Date.now()}${fileExtension}`);
+}
+
+function buildFileContent({ datePart, actualMaidName, folderName, processedContent, themed }) {
+    if (!themed) return `[${datePart}] - ${actualMaidName}\n${processedContent}`;
+    return [
+        '---',
+        `date: ${datePart}`,
+        `agent: ${actualMaidName}`,
+        `notebook: ${folderName}`,
+        '---',
+        '',
+        processedContent,
+    ].join('\n');
 }
 // --- Tag Processing Functions ---
 
@@ -347,6 +466,8 @@ async function writeDiary(maidName, dateString, contentText) {
         debugLog(`No tag detected. Folder: ${folderName}, Actual Maid: ${actualMaidName}`);
     }
 
+    ({ folderName, actualMaidName } = normalizeSilverCompanionMaid(folderName, actualMaidName));
+
     // Sanitize the final folderName to remove invalid characters and trailing spaces/dots.
     const sanitizedFolderName = sanitizePathComponent(folderName);
     if (folderName !== sanitizedFolderName) {
@@ -361,16 +482,25 @@ async function writeDiary(maidName, dateString, contentText) {
     const timeStringForFile = `${hours}_${minutes}_${seconds}`;
 
     const dirPath = path.join(dailyNoteRootPath, sanitizedFolderName);
-    const baseFileNameWithoutExt = `${datePart}-${timeStringForFile}`;
+    const useThemedFileName = shouldUseThemedFileName(sanitizedFolderName, actualMaidName, processedContent);
+    const titlePart = limitFileNamePart(extractTitleFromContent(processedContent));
+    const agentPart = limitFileNamePart(actualMaidName || THEMED_FILE_PREFIX, 18);
+    const baseFileNameWithoutExt = useThemedFileName
+        ? `${datePart}_${agentPart}_${titlePart}`
+        : `${datePart}-${timeStringForFile}`;
     const fileExtension = `.${CONFIGURED_EXTENSION}`;
-    const finalFileName = `${baseFileNameWithoutExt}${fileExtension}`;
-    const filePath = path.join(dirPath, finalFileName);
-
-    debugLog(`Target file path: ${filePath}`);
 
     // **步骤2: 写入文件 - 使用处理后的内容（包含规范化的Tag）**
     await fs.mkdir(dirPath, { recursive: true });
-    const fileContent = `[${datePart}] - ${actualMaidName}\n${processedContent}`;
+    const filePath = await uniqueFilePath(dirPath, baseFileNameWithoutExt, fileExtension);
+    debugLog(`Target file path: ${filePath}`);
+    const fileContent = buildFileContent({
+        datePart,
+        actualMaidName,
+        folderName: sanitizedFolderName,
+        processedContent,
+        themed: useThemedFileName,
+    });
     await fs.writeFile(filePath, fileContent);
     debugLog(`Successfully wrote file (length: ${fileContent.length})`);
     return filePath; // Return the path on success

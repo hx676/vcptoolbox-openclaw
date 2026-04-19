@@ -53,6 +53,23 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
         }
     }
 
+    async function pathExists(targetPath) {
+        try {
+            await fs.access(targetPath);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    async function ensurePathIsNotSymlink(targetPath, errorMessage) {
+        if (await pathExists(targetPath) && await isSymlink(targetPath)) {
+            const error = new Error(errorMessage);
+            error.statusCode = 403;
+            throw error;
+        }
+    }
+
     // ══════════════════════════════════════════════════
     //  信号量 —— 替代手写队列，杜绝死锁
     // ══════════════════════════════════════════════════
@@ -303,29 +320,42 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
      */
     async function queuedSearch(searchTerms, folder, callerSignal) {
         const hash = hashSearchParams(searchTerms, folder);
+        const waitForCallerAbort = () => {
+            if (!callerSignal) return null;
+            if (callerSignal.aborted) {
+                return Promise.reject(new DOMException('Search aborted', 'AbortError'));
+            }
+            return new Promise((_, reject) => {
+                const onAbort = () => {
+                    callerSignal.removeEventListener('abort', onAbort);
+                    reject(new DOMException('Search aborted', 'AbortError'));
+                };
+                callerSignal.addEventListener('abort', onAbort, { once: true });
+            });
+        };
+
+        const awaitEntry = async (entry) => {
+            entry.refCount++;
+            try {
+                const callerAbortPromise = waitForCallerAbort();
+                return callerAbortPromise ? await Promise.race([entry.promise, callerAbortPromise]) : await entry.promise;
+            } finally {
+                entry.refCount--;
+                if (entry.refCount <= 0 && entry.settled) {
+                    inflightSearches.delete(hash);
+                }
+            }
+        };
 
         // ── 1. 请求去重：如果同样的搜索正在执行，直接复用 ──
         if (inflightSearches.has(hash)) {
             const entry = inflightSearches.get(hash);
-            entry.refCount++;
             if (DEBUG_MODE) console.log(`[Search] Reusing inflight: ${hash} (refs: ${entry.refCount})`);
-
-            try {
-                return await entry.promise;
-            } finally {
-                entry.refCount--;
-                if (entry.refCount <= 0) {
-                    inflightSearches.delete(hash);
-                }
-            }
+            return await awaitEntry(entry);
         }
 
         // ── 2. 占位，但用独立的 abort controller ──
         const ac = new AbortController();
-
-        // 如果调用方信号取消，也取消搜索
-        const onCallerAbort = () => ac.abort();
-        callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
 
         // ── 3. 构建搜索 promise（不用 async executor！）──
         const searchPromise = (async () => {
@@ -346,24 +376,30 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
             } finally {
                 clearTimeout(timer);
                 searchSemaphore.release();
-                callerSignal?.removeEventListener('abort', onCallerAbort);
 
                 if (DEBUG_MODE) console.log(`[Search] Released slot: ${hash} | ${JSON.stringify(searchSemaphore.stats)}`);
             }
         })();
 
         // ── 4. 注册去重缓存 ──
-        const entry = { promise: searchPromise, refCount: 1 };
+        const entry = { promise: searchPromise, refCount: 0, settled: false };
         inflightSearches.set(hash, entry);
-
-        try {
-            return await searchPromise;
-        } finally {
-            entry.refCount--;
-            if (entry.refCount <= 0) {
-                inflightSearches.delete(hash);
+        searchPromise.then(
+            () => {
+                entry.settled = true;
+                if (entry.refCount <= 0) {
+                    inflightSearches.delete(hash);
+                }
+            },
+            () => {
+                entry.settled = true;
+                if (entry.refCount <= 0) {
+                    inflightSearches.delete(hash);
+                }
             }
-        }
+        );
+
+        return await awaitEntry(entry);
     }
 
     // ══════════════════════════════════════════════════
@@ -592,12 +628,14 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
         }
 
         try {
+            await ensurePathIsNotSymlink(targetFolderPath, 'Cannot write into symbolic link folders');
+            await ensurePathIsNotSymlink(filePath, 'Cannot overwrite symbolic link files');
             await fs.mkdir(targetFolderPath, { recursive: true });
             await fs.writeFile(filePath, content, 'utf-8');
             dirCache.invalidate(targetFolderPath);
             res.json({ message: 'Saved successfully' });
         } catch (error) {
-            res.status(500).json({ error: 'Failed to save file', details: error.message });
+            res.status(error.statusCode || 500).json({ error: 'Failed to save file', details: error.message });
         }
     });
 
@@ -621,15 +659,17 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
         }
 
         try {
+            await ensurePathIsNotSymlink(targetFolderPath, 'Cannot move notes into symbolic link folders');
             await fs.mkdir(targetFolderPath, { recursive: true });
             dirCache.invalidate(targetFolderPath);
             for (const note of sourceNotes) {
-                if (note.folder.includes('..') || note.file.includes('..')) {
+                if (note.folder.includes('..') || note.file.includes('..') || note.folder.includes('/') || note.file.includes('/') || note.folder.includes('\\') || note.file.includes('\\')) {
                     results.errors.push({ note: `${note.folder}/${note.file}`, error: 'Invalid path' });
                     continue;
                 }
 
                 const sourceFilePath = path.join(dailyNoteRootPath, note.folder, note.file);
+                const sourceFolderPath = path.join(dailyNoteRootPath, note.folder);
                 const destinationFilePath = path.join(targetFolderPath, note.file);
 
                 if (!isPathSafe(sourceFilePath, dailyNoteRootPath) || !isPathSafe(destinationFilePath, dailyNoteRootPath)) {
@@ -638,7 +678,10 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
                 }
 
                 try {
+                    await ensurePathIsNotSymlink(sourceFolderPath, 'Cannot move notes out of symbolic link folders');
                     await fs.access(sourceFilePath);
+                    await ensurePathIsNotSymlink(sourceFilePath, 'Cannot move symbolic link source files');
+                    await ensurePathIsNotSymlink(destinationFilePath, 'Cannot overwrite symbolic link destination files');
                     try {
                         await fs.access(destinationFilePath);
                         results.errors.push({
@@ -677,13 +720,23 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
 
         const results = { deleted: [], errors: [] };
         for (const note of notesToDelete) {
+            if (!note || typeof note.folder !== 'string' || typeof note.file !== 'string' ||
+                note.folder.includes('..') || note.file.includes('..') ||
+                note.folder.includes('/') || note.file.includes('/') ||
+                note.folder.includes('\\') || note.file.includes('\\')) {
+                results.errors.push({ note: `${note?.folder || '?'}/${note?.file || '?'}`, error: 'Invalid path' });
+                continue;
+            }
             const filePath = path.join(dailyNoteRootPath, note.folder, note.file);
+            const folderPath = path.join(dailyNoteRootPath, note.folder);
             if (!isPathSafe(filePath, dailyNoteRootPath)) {
                 results.errors.push({ note: `${note.folder}/${note.file}`, error: 'Invalid path' });
                 continue;
             }
 
             try {
+                await ensurePathIsNotSymlink(folderPath, 'Cannot delete from symbolic link folders');
+                await ensurePathIsNotSymlink(filePath, 'Cannot delete symbolic link files');
                 await fs.unlink(filePath);
                 dirCache.invalidate(path.dirname(filePath));
                 results.deleted.push(`${note.folder}/${note.file}`);
@@ -698,6 +751,9 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
     router.post('/folder/delete', async (req, res) => {
         const { folderName } = req.body;
         if (!folderName) return res.status(400).json({ error: 'Folder name required' });
+        if (folderName.includes('..') || folderName.includes('/') || folderName.includes('\\')) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
 
         const targetFolderPath = path.join(dailyNoteRootPath, folderName);
         if (!isPathSafe(targetFolderPath, dailyNoteRootPath) || targetFolderPath === path.resolve(dailyNoteRootPath)) {
@@ -705,6 +761,7 @@ module.exports = function (dailyNoteRootPath, DEBUG_MODE) {
         }
 
         try {
+            await ensurePathIsNotSymlink(targetFolderPath, 'Cannot delete symbolic link folders');
             await fs.access(targetFolderPath);
             
             const files = await fs.readdir(targetFolderPath);

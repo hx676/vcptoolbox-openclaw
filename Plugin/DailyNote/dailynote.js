@@ -24,6 +24,25 @@ const CONFIGURED_EXTENSION = (process.env.DAILY_NOTE_EXTENSION || "txt").toLower
 
 // 忽略的文件夹列表
 const IGNORED_FOLDERS = ['MusicDiary'];
+const SILVER_COMPANION_PRIVATE_NOTEBOOKS = Object.freeze([
+    {
+        notebook: '银发陪伴助手',
+        aliases: new Set([
+            'silvercompanion',
+            'silvercompanioncompanion',
+            'silvercompanion_companion',
+            '银发陪伴助手'
+        ]),
+    },
+    {
+        notebook: '银发分析助手',
+        aliases: new Set([
+            'silvercompanionanalyzer',
+            'silvercompanion_analyzer',
+            '银发分析助手'
+        ]),
+    },
+]);
 
 
 // --- Debug Logging (to stderr) ---
@@ -31,6 +50,41 @@ function debugLog(message, ...args) {
     if (DEBUG_MODE) {
         console.error(`[DailyNote][Debug] ${message}`, ...args); // Log debug to stderr
     }
+}
+
+function isSilverCompanionIdentity(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return SILVER_COMPANION_PRIVATE_NOTEBOOKS.some((item) => item.aliases.has(normalized));
+}
+
+function resolveSilverCompanionNotebook(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    const matched = SILVER_COMPANION_PRIVATE_NOTEBOOKS.find((item) => item.aliases.has(normalized));
+    if (matched) return matched.notebook;
+
+    const companionMatch = normalized.match(/^silvercompanion_(.+)_companion$/);
+    if (companionMatch && companionMatch[1]) {
+        return `银发陪伴助手__${companionMatch[1]}`;
+    }
+
+    const analyzerMatch = normalized.match(/^silvercompanion_(.+)_analyzer$/);
+    if (analyzerMatch && analyzerMatch[1]) {
+        return `银发分析助手__${analyzerMatch[1]}`;
+    }
+
+    return null;
+}
+
+function normalizeSilverCompanionMaid(folderName, actualMaidName) {
+    const resolvedNotebook = resolveSilverCompanionNotebook(folderName) || resolveSilverCompanionNotebook(actualMaidName);
+    if (resolvedNotebook) {
+        debugLog(`SilverCompanion notebook interception: "${folderName}" / "${actualMaidName}" -> "${resolvedNotebook}"`);
+        return {
+            folderName: resolvedNotebook,
+            actualMaidName: resolvedNotebook
+        };
+    }
+    return { folderName, actualMaidName };
 }
 
 // --- Helper Function for Sanitization (增强版) ---
@@ -287,6 +341,8 @@ async function handleCreateCommand(args) {
             debugLog(`No tag detected. Folder: ${folderName}, Actual Maid: ${actualMaidName}`);
         }
 
+        ({ folderName, actualMaidName } = normalizeSilverCompanionMaid(folderName, actualMaidName));
+
         const sanitizedFolderName = sanitizePathComponent(folderName);
         if (folderName !== sanitizedFolderName) {
             debugLog(`Sanitized folder name from "${folderName}" to "${sanitizedFolderName}"`);
@@ -385,7 +441,8 @@ async function handleUpdateCommand(args) {
 
             if (match) {
                 // 格式: [小克的知识]小克 -> 优先在 "小克的知识" 文件夹找
-                const priorityFolder = sanitizePathComponent(match[1]);
+                const normalizedMaid = normalizeSilverCompanionMaid(match[1], maid.replace(/^\[.*?\]/, '').trim());
+                const priorityFolder = sanitizePathComponent(normalizedMaid.folderName);
                 debugLog(`Maid specifies priority folder (sanitized): '${priorityFolder}'`);
 
                 for (const dirEntry of allDirs) {
@@ -409,7 +466,8 @@ async function handleUpdateCommand(args) {
                 }
             } else {
                 // 格式: 小克 -> 优先在以 "小克" 开头的文件夹找
-                const sanitizedMaid = sanitizePathComponent(maid);
+                const normalizedMaid = normalizeSilverCompanionMaid(maid, maid);
+                const sanitizedMaid = sanitizePathComponent(normalizedMaid.folderName);
                 debugLog(`Maid specified: '${maid}' (sanitized: '${sanitizedMaid}'). Prioritizing directories starting with this name.`);
 
                 for (const dirEntry of allDirs) {

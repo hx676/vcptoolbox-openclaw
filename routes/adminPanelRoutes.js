@@ -6,7 +6,7 @@ const path = require('path');
  * Admin Panel API Routes
  * This file has been modularized. individual route handlers are located in ./admin/*.js
  */
-module.exports = function (DEBUG_MODE, dailyNoteRootPath, pluginManager, getCurrentServerLogPath, vectorDBManager, agentDirPath, cachedEmojiLists, tvsDirPath) {
+module.exports = function (DEBUG_MODE, dailyNoteRootPath, pluginManager, getCurrentServerLogPath, vectorDBManager, agentDirPath, cachedEmojiLists, tvsDirPath, extraOptions = {}) {
     if (!agentDirPath || typeof agentDirPath !== 'string') {
         throw new Error('[AdminPanelRoutes] agentDirPath must be a non-empty string');
     }
@@ -25,7 +25,8 @@ module.exports = function (DEBUG_MODE, dailyNoteRootPath, pluginManager, getCurr
         vectorDBManager,
         agentDirPath,
         cachedEmojiLists,
-        tvsDirPath
+        tvsDirPath,
+        ...extraOptions
     };
 
     /**

@@ -14,13 +14,57 @@ class SemanticGroupManager {
         this.groupsFilePath = path.join(__dirname, 'semantic_groups.json');
         this.vectorsDirPath = path.join(__dirname, 'semantic_vectors');
         this.editFilePath = path.join(__dirname, 'semantic_groups.edit.json');
+        this.groupsExampleFilePath = path.join(__dirname, 'semantic_groups.json.example');
+        this.editExampleFilePath = path.join(__dirname, 'semantic_groups.edit.json.example');
         this.initialize();
     }
 
     async initialize() {
         await fs.mkdir(this.vectorsDirPath, { recursive: true });
+        await this.bootstrapGroupFiles();
         await this.synchronizeFromEditFile();
         await this.loadGroups();
+    }
+
+    async bootstrapGroupFiles() {
+        const readJsonIfExists = async (filePath) => {
+            try {
+                const content = await fs.readFile(filePath, 'utf-8');
+                return JSON.parse(content);
+            } catch (error) {
+                if (error.code === 'ENOENT') {
+                    return null;
+                }
+                throw error;
+            }
+        };
+
+        const writeJson = async (filePath, data) => {
+            await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+        };
+
+        const defaultData = { config: {}, groups: {} };
+        const existingMain = await readJsonIfExists(this.groupsFilePath);
+        const mainData =
+            existingMain ??
+            await readJsonIfExists(this.groupsExampleFilePath) ??
+            await readJsonIfExists(this.editFilePath) ??
+            await readJsonIfExists(this.editExampleFilePath) ??
+            defaultData;
+
+        if (!existingMain) {
+            await writeJson(this.groupsFilePath, mainData);
+            console.log('[SemanticGroup] Created semantic_groups.json from bootstrap data.');
+        }
+
+        const existingEdit = await readJsonIfExists(this.editFilePath);
+        if (!existingEdit) {
+            const editData =
+                await readJsonIfExists(this.editExampleFilePath) ??
+                mainData;
+            await writeJson(this.editFilePath, editData);
+            console.log('[SemanticGroup] Created semantic_groups.edit.json from bootstrap data.');
+        }
     }
 
     async synchronizeFromEditFile() {

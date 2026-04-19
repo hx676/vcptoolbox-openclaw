@@ -26,6 +26,7 @@ class PluginManager extends EventEmitter {
         this.serviceModules = new Map();
         this.projectBasePath = null;
         this.individualPluginDescriptions = new Map(); // New map for individual descriptions
+        this.allToolsPromptDescription = '';
         this.debugMode = (process.env.DebugMode || "False").toLowerCase() === "true";
         this.webSocketServer = null; // 为 WebSocketServer 实例占位
         this.isReloading = false;
@@ -61,6 +62,37 @@ class PluginManager extends EventEmitter {
     setProjectBasePath(basePath) {
         this.projectBasePath = basePath;
         if (this.debugMode) console.log(`[PluginManager] Project base path set to: ${this.projectBasePath}`);
+    }
+
+    _spawnShellCommand(commandString, options = {}) {
+        if (typeof commandString !== 'string' || commandString.trim() === '') {
+            throw new Error('Plugin command must be a non-empty string.');
+        }
+        return spawn(commandString, {
+            shell: true,
+            windowsHide: true,
+            ...options
+        });
+    }
+
+    _sanitizeApprovalPayload(value) {
+        if (typeof value === 'string') {
+            if (value.startsWith('data:')) {
+                return `[data-url omitted, length=${value.length}]`;
+            }
+            return value.length > 2000 ? `${value.slice(0, 1997)}...` : value;
+        }
+        if (Array.isArray(value)) {
+            return value.slice(0, 20).map(item => this._sanitizeApprovalPayload(item));
+        }
+        if (value && typeof value === 'object') {
+            const sanitized = {};
+            for (const [key, nestedValue] of Object.entries(value).slice(0, 40)) {
+                sanitized[key] = this._sanitizeApprovalPayload(nestedValue);
+            }
+            return sanitized;
+        }
+        return value;
     }
 
     _getPluginConfig(pluginManifest) {
@@ -137,8 +169,10 @@ class PluginManager extends EventEmitter {
             }
 
 
-            const [command, ...args] = plugin.entryPoint.command.split(' ');
-            const pluginProcess = spawn(command, args, { cwd: plugin.basePath, shell: true, env: envForProcess, windowsHide: true });
+            const pluginProcess = this._spawnShellCommand(plugin.entryPoint.command, {
+                cwd: plugin.basePath,
+                env: envForProcess
+            });
             let output = '';
             let errorOutput = '';
             let processExited = false;
@@ -415,6 +449,10 @@ class PluginManager extends EventEmitter {
 
     async loadPlugins() {
         console.log('[PluginManager] Starting plugin discovery...');
+        for (const job of this.scheduledJobs.values()) {
+            job.cancel();
+        }
+        this.scheduledJobs.clear();
         // 1. 清理现有插件状态
         // 1.1 识别并关闭本地插件，保留分布式插件
         const distributedPlugins = new Map();
@@ -610,14 +648,23 @@ class PluginManager extends EventEmitter {
     buildVCPDescription() {
         this.individualPluginDescriptions.clear(); // Clear previous descriptions
         let overallLog = ['[PluginManager] Building individual VCP descriptions:'];
+        this.allToolsPromptDescription = '';
+        const compactToolLines = [];
+        const normalizePromptSnippet = (text, maxLength = 220) => {
+            if (!text) return '';
+            const normalized = String(text).replace(/\s+/g, ' ').trim();
+            if (normalized.length <= maxLength) return normalized;
+            return `${normalized.slice(0, maxLength - 3)}...`;
+        };
 
         for (const plugin of this.plugins.values()) {
             if (plugin.capabilities && plugin.capabilities.invocationCommands && plugin.capabilities.invocationCommands.length > 0) {
                 let pluginSpecificDescriptions = [];
                 plugin.capabilities.invocationCommands.forEach(cmd => {
-                    if (cmd.description) {
+                    const sourceDescription = cmd.description || plugin.description || '';
+                    if (sourceDescription) {
                         let commandDescription = `- ${plugin.displayName} (${plugin.name}) - 命令: ${cmd.command || 'N/A'}:\n`; // Assuming cmd might have a 'command' field or similar identifier
-                        const indentedCmdDescription = cmd.description.split('\n').map(line => `    ${line}`).join('\n');
+                        const indentedCmdDescription = sourceDescription.split('\n').map(line => `    ${line}`).join('\n');
                         commandDescription += `${indentedCmdDescription}`;
 
                         if (cmd.example) {
@@ -626,6 +673,9 @@ class PluginManager extends EventEmitter {
                             commandDescription += exampleHeader + indentedExample;
                         }
                         pluginSpecificDescriptions.push(commandDescription);
+                        const compactCommand = normalizePromptSnippet(cmd.command || plugin.name, 64);
+                        const compactDescription = normalizePromptSnippet(sourceDescription, 180);
+                        compactToolLines.push(`- ${plugin.displayName} (${plugin.name}) | command: ${compactCommand} | ${compactDescription}`);
                     }
                 });
 
@@ -641,12 +691,22 @@ class PluginManager extends EventEmitter {
         if (this.individualPluginDescriptions.size === 0) {
             overallLog.push("  - No VCP plugins with invocation commands found to generate descriptions for.");
         }
+        this.allToolsPromptDescription = compactToolLines.length > 0
+            ? [
+                'Available VCP tools summary. Use the VCP tool request format from {{VarVCPGuide}} when a tool is needed.',
+                ...compactToolLines
+            ].join('\n')
+            : 'No available VCP tool descriptions';
         if (this.debugMode) console.log(overallLog.join('\n'));
     }
 
     // New method to get all individual descriptions
     getIndividualPluginDescriptions() {
         return this.individualPluginDescriptions;
+    }
+
+    getAllToolsPromptDescription() {
+        return this.allToolsPromptDescription || 'No available VCP tool descriptions';
     }
 
     getAllPlaceholderValues() {
@@ -762,6 +822,7 @@ class PluginManager extends EventEmitter {
 
             const approvalPromise = new Promise((resolve, reject) => {
                 const timeoutDuration = this.toolApprovalManager.getTimeoutMs();
+                const createdAt = Date.now();
                 const timeoutId = setTimeout(() => {
                     if (this.pendingApprovals.has(requestId)) {
                         this.pendingApprovals.delete(requestId);
@@ -769,7 +830,17 @@ class PluginManager extends EventEmitter {
                     }
                 }, timeoutDuration);
 
-                this.pendingApprovals.set(requestId, { resolve, reject, timeoutId });
+                this.pendingApprovals.set(requestId, {
+                    requestId,
+                    toolName,
+                    maid: maidNameFromArgs || null,
+                    args: this._sanitizeApprovalPayload(pluginSpecificArgs),
+                    createdAt,
+                    expiresAt: createdAt + timeoutDuration,
+                    resolve,
+                    reject,
+                    timeoutId
+                });
             });
 
             // 发送审核请求到管理面板
@@ -780,10 +851,11 @@ class PluginManager extends EventEmitter {
                         requestId,
                         toolName,
                         maid: maidNameFromArgs,
-                        args: pluginSpecificArgs,
+                        args: this._sanitizeApprovalPayload(pluginSpecificArgs),
                         timestamp: _getFormattedLocalTimestamp()
                     }
                 };
+                this.webSocketServer.broadcast(approvalRequest, 'AdminPanel');
                 this.webSocketServer.broadcast(approvalRequest, 'VCPLog');
                 console.log(`[PluginManager] 🔔 正在等待工具调用人工审核: ${toolName} (ID: ${requestId})`);
             } else {
@@ -973,10 +1045,12 @@ class PluginManager extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             if (this.debugMode) console.log(`[PluginManager executePlugin Internal] For plugin "${pluginName}", manifest entryPoint command is: "${plugin.entryPoint.command}"`);
-            const [command, ...args] = plugin.entryPoint.command.split(' ');
-            if (this.debugMode) console.log(`[PluginManager executePlugin Internal] Attempting to spawn command: "${command}" with args: [${args.join(', ')}] in cwd: ${plugin.basePath}`);
+            if (this.debugMode) console.log(`[PluginManager executePlugin Internal] Attempting to spawn command string: "${plugin.entryPoint.command}" in cwd: ${plugin.basePath}`);
 
-            const pluginProcess = spawn(command, args, { cwd: plugin.basePath, shell: true, env: finalEnv, windowsHide: true });
+            const pluginProcess = this._spawnShellCommand(plugin.entryPoint.command, {
+                cwd: plugin.basePath,
+                env: finalEnv
+            });
 
 
             let outputBuffer = ''; // Buffer to accumulate data chunks
@@ -1141,6 +1215,19 @@ class PluginManager extends EventEmitter {
             return true;
         }
         return false;
+    }
+
+    getPendingApprovalsSnapshot() {
+        return Array.from(this.pendingApprovals.values())
+            .map(approval => ({
+                requestId: approval.requestId,
+                toolName: approval.toolName,
+                maid: approval.maid,
+                args: approval.args,
+                createdAt: approval.createdAt,
+                expiresAt: approval.expiresAt
+            }))
+            .sort((a, b) => a.createdAt - b.createdAt);
     }
 
     initializeServices(app, adminApiRouter, projectBasePath) {

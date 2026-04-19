@@ -34,10 +34,18 @@ class NonStreamHandler {
       originalBody,
       clientIp,
       _refreshRagBlocksIfNeeded,
-      fetchWithRetry
+      fetchWithRetry,
+      fetchNonStreamCompatibleResponse
     } = this.context;
 
     const shouldShowVCP = SHOW_VCP_OUTPUT || this.context.forceShowVCP;
+    const shouldUseBufferedCodex = () =>
+      typeof fetchNonStreamCompatibleResponse === 'function' &&
+      (
+        typeof this.context.shouldEnsureCodexInstructions === 'function'
+          ? this.context.shouldEnsureCodexInstructions(apiUrl, originalBody)
+          : String(apiUrl || '').toLowerCase().includes('/codex')
+      );
 
     const firstArrayBuffer = await firstAiAPIResponse.arrayBuffer();
     const responseBuffer = Buffer.from(firstArrayBuffer);
@@ -129,16 +137,27 @@ class NonStreamHandler {
           const errorPayload = `<!-- VCP_TOOL_PAYLOAD -->\n${JSON.stringify(archeryErrorContents)}`;
           currentMessagesForNonStreamLoop.push({ role: 'user', content: errorPayload });
 
-          const recursionAiResponse = await fetchWithRetry(
-            `${apiUrl}/v1/chat/completions`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-              body: JSON.stringify({ ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false }),
-              signal: abortController.signal,
-            },
-            { retries: apiRetries, delay: apiRetryDelay, debugMode: DEBUG_MODE }
-          );
+          const recursionAiResponse = shouldUseBufferedCodex()
+            ? await fetchNonStreamCompatibleResponse({
+                apiUrl,
+                apiKey,
+                body: { ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false },
+                abortController,
+                fetchWithRetry,
+                apiRetries,
+                apiRetryDelay,
+                debugMode: DEBUG_MODE,
+              })
+            : await fetchWithRetry(
+                `${apiUrl}/v1/chat/completions`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                  body: JSON.stringify({ ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false }),
+                  signal: abortController.signal,
+                },
+                { retries: apiRetries, delay: apiRetryDelay, debugMode: DEBUG_MODE }
+              );
 
           if (recursionAiResponse.ok) {
             const recursionArrayBuffer = await recursionAiResponse.arrayBuffer();
@@ -236,16 +255,27 @@ class NonStreamHandler {
 
         currentMessagesForNonStreamLoop.push({ role: 'user', content: finalToolPayloadForAI });
 
-        const recursionAiResponse = await fetchWithRetry(
-          `${apiUrl}/v1/chat/completions`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({ ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false }),
-            signal: abortController.signal,
-          },
-          { retries: apiRetries, delay: apiRetryDelay, debugMode: DEBUG_MODE }
-        );
+        const recursionAiResponse = shouldUseBufferedCodex()
+          ? await fetchNonStreamCompatibleResponse({
+              apiUrl,
+              apiKey,
+              body: { ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false },
+              abortController,
+              fetchWithRetry,
+              apiRetries,
+              apiRetryDelay,
+              debugMode: DEBUG_MODE,
+            })
+          : await fetchWithRetry(
+              `${apiUrl}/v1/chat/completions`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+                body: JSON.stringify({ ...originalBody, messages: currentMessagesForNonStreamLoop, stream: false }),
+                signal: abortController.signal,
+              },
+              { retries: apiRetries, delay: apiRetryDelay, debugMode: DEBUG_MODE }
+            );
 
         if (!recursionAiResponse.ok) break;
 
