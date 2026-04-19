@@ -1,5 +1,9 @@
 # VCPToolBox OpenClaw Fork
 
+中文：这是作为整套系统后端核心的 `VCPToolBox` 二开版，负责工具执行、知识库与记忆、OpenClaw 集成、渠道镜像和 AgentFlow Runtime。
+
+English: This is a customized `VCPToolBox` backend fork that powers tools, knowledge and memory, OpenClaw integration, channel mirroring, and the AgentFlow runtime.
+
 [![Fork: VCPToolBox](https://img.shields.io/badge/Fork-VCPToolBox-2f81f7)](https://github.com/hx676/vcptoolbox-openclaw)
 [![Paired Frontend](https://img.shields.io/badge/Paired%20Frontend-vcpchat--openclaw-111827)](https://github.com/hx676/vcpchat-openclaw)
 [![OpenClaw Integrated](https://img.shields.io/badge/OpenClaw-Integrated-16a34a)](https://github.com/hx676/vcptoolbox-openclaw)
@@ -22,6 +26,33 @@
 - 当前仓库已经按 `VCP-only` 路线收口长期知识库与记忆能力。
 - GitHub 首页已补齐 README、About、Description 和 Topics。
 - 推荐阅读顺序是：`README -> BEGINNER_MANUAL -> docs -> paired repo -> 本地配置`。
+
+## 安装前提
+
+| 项目 | 建议 |
+| --- | --- |
+| 操作系统 | Windows 10 / 11 |
+| Node.js | `>= 20.x` |
+| npm | `>= 9.x` |
+| Python | `>= 3.10` |
+| 核心本地依赖 | `better-sqlite3`、本地文件系统写权限、可用网络 |
+| 配套前端 | 推荐配合 [vcpchat-openclaw](https://github.com/hx676/vcpchat-openclaw) 使用 |
+
+## 总架构图
+
+```mermaid
+flowchart LR
+    User["用户 / 渠道消息"] --> Channel["微信 / 飞书 / OpenClaw 渠道"]
+    User --> Chat["VCPChat<br/>配套前端仓库"]
+    Channel --> OpenClaw["OpenClaw"]
+    OpenClaw --> Toolbox["VCPToolBox<br/>当前仓库"]
+    Toolbox --> Memory["VCP Knowledge Base / Memory"]
+    Toolbox --> Tools["Plugins / Tool Runtime"]
+    Toolbox --> Workflow["AgentFlow Runtime"]
+    Toolbox --> Mirror["Channel Mirror Store"]
+    Mirror --> Chat
+    Workflow --> Chat
+```
 
 ## 一眼看懂
 
