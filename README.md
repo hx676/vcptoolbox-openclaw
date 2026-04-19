@@ -1,5 +1,28 @@
 # VCPToolBox OpenClaw Fork
 
+[![Fork: VCPToolBox](https://img.shields.io/badge/Fork-VCPToolBox-2f81f7)](https://github.com/hx676/vcptoolbox-openclaw)
+[![Paired Frontend](https://img.shields.io/badge/Paired%20Frontend-vcpchat--openclaw-111827)](https://github.com/hx676/vcpchat-openclaw)
+[![OpenClaw Integrated](https://img.shields.io/badge/OpenClaw-Integrated-16a34a)](https://github.com/hx676/vcptoolbox-openclaw)
+[![VCP Only KB](https://img.shields.io/badge/VCP--only-Knowledge%20Base-f59e0b)](https://github.com/hx676/vcptoolbox-openclaw)
+[![Memory Write](https://img.shields.io/badge/Memory-Search%20%26%20Write-7c3aed)](https://github.com/hx676/vcptoolbox-openclaw)
+[![AgentFlow Runtime](https://img.shields.io/badge/AgentFlow-Runtime-0ea5e9)](https://github.com/hx676/vcptoolbox-openclaw)
+
+## 首页导航
+
+| 入口 | 说明 |
+| --- | --- |
+| [当前仓库](https://github.com/hx676/vcptoolbox-openclaw) | `VCPToolBox` 后端、记忆/RAG、工具、OpenClaw 集成 |
+| [配套前端](https://github.com/hx676/vcpchat-openclaw) | `VCPChat` 桌面前端与可视化入口 |
+| [文档目录](/E:/2026/VCPToolBox/docs/DOCUMENTATION_INDEX.md) | 当前仓库的工程文档入口 |
+| [新手手册](/E:/2026/VCPToolBox/docs/BEGINNER_MANUAL.md) | 面向部署和使用的入门手册 |
+| [上游项目](https://github.com/lioensky/VCPToolBox) | 原始 `VCPToolBox` 仓库 |
+
+## 当前状态
+
+- 当前仓库已经按 `VCP-only` 路线收口长期知识库与记忆能力。
+- GitHub 首页已补齐 README、About、Description 和 Topics。
+- 推荐阅读顺序是：`README -> BEGINNER_MANUAL -> docs -> paired repo -> 本地配置`。
+
 这是 `VCPToolBox` 的个人二次开发版本，仓库地址为：
 
 - 后端仓库：[hx676/vcptoolbox-openclaw](https://github.com/hx676/vcptoolbox-openclaw)
